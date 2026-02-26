@@ -1,0 +1,66 @@
+{
+    "name": "battle-among-regions",
+    "private": true,
+    "version": "1.0.0",
+    "type": "module",
+    "main": "electron/main.cjs",
+    "scripts": {
+        "dev": "vite",
+        "optimize": "node scripts/optimize-images.cjs",
+        "build": "node scripts/optimize-images.cjs && vite build",
+        "preview": "vite preview",
+        "test": "vitest run",
+        "electron:dev": "npm run build && electron .",
+        "electron:build": "npm run build && electron-builder --win",
+        "server": "node server/server.mjs",
+        "online:dev": "cmd /c \"start cmd /c npm run dev && node server/server.mjs\""
+    },
+    "devDependencies": {
+        "electron": "^34.0.0",
+        "electron-builder": "^25.1.8",
+        "sharp": "^0.34.5",
+        "vite": "^6.0.0"
+    },
+    "dependencies": {
+        "express": "^5.2.1",
+        "playwright": "^1.58.2",
+        "ws": "^8.19.0"
+    },
+    "build": {
+        "appId": "com.bar.battle-among-regions",
+        "productName": "Battle Among Regions",
+        "directories": {
+            "output": "dist-electron"
+        },
+        "asar": false,
+        "files": [
+            "**/*",
+            "!src/**",
+            "!public/**",
+            "!node_modules/**",
+            "!*.csv",
+            "!*.pdf",
+            "!*.bat",
+            "!*.md",
+            "!.vscode/**",
+            "!dist-electron/**",
+            "!test_*.js",
+            "!test_*.cjs",
+            "!Rulebook*"
+        ],
+        "win": {
+            "target": [
+                {
+                    "target": "portable",
+                    "arch": [
+                        "x64"
+                    ]
+                }
+            ],
+            "icon": null
+        },
+        "portable": {
+            "artifactName": "BattleAmongRegions.exe"
+        }
+    }
+}

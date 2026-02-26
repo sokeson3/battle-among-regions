@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: bar-game-server
+    runtime: node
+    buildCommand: npm install
+    startCommand: node server/server.mjs
+    envVars:
+      - key: PORT
+        value: 10000

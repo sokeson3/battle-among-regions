@@ -1,0 +1,32 @@
+# Local Netlify folder
+.netlify
+
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+dist-electron/
+
+# Optimized images (generated at build time)
+public/output-web/
+public/Background.webp
+
+# Environment files (local overrides)
+.env.local
+.env.*.local
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+Thumbs.db
+.DS_Store
+
+# Electron
+*.exe
+*.dmg
+
+# Misc
+*.log

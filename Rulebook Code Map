@@ -1,0 +1,107 @@
+# Rulebook to Codebase Mapping
+
+This document provides an overview of how the game's rulebook and progression phases are directly implemented in the codebase. It is structured chronologically, following the flow of a standard game or campaign. Use this as a reference when editing game rules or diagnosing bugs.
+
+---
+
+## 1. Game Setup & Deckbuilding
+Before a match begins, players assemble their decks and the game engine initializes the state.
+
+**Supporting Code:**
+- **Deckbuilding Logic:** `src/ui/DeckBuilderUI.js`
+  - Handles the "drafting" and "modify deck" UI flows (`buildDeck`, `_showDraftScreen`, `_showModifyScreen`).
+- **Campaign Rules & Storage:** `src/campaign/WarCampaignData.js` / `src/campaign/CampaignData.js`
+  - Defines round rules, deck sizes, and VP rewards (e.g., `WAR_ROUNDS_MULTI`, `WAR_ROUNDS_2P`).
+- **Game Initialization:** `src/engine/GameController.js` (`setupGame`)
+  - Takes the selected decks/configs, filters them into CardInstances using `src/engine/CardDatabase.js`, and loads them into `src/engine/GameState.js`.
+- **UI Entry Point:** `src/ui/GameUI.js` (`showMenu`, `showRegionSelect`, `startGame`) and `src/main.js` (`init`).
+
+---
+
+## 2. Pre-Game: Landmark Placement & Mulligan
+Before the first turn, players can place a free Landmark and mulligan their opening hand.
+
+**Supporting Code:**
+- **Initial Draw:** `src/engine/TurnManager.js` (`startGame`)
+  - Shuffles decks and deals 5 cards to Player 1, 6 cards to Player 2+.
+- **Pre-game Landmark Placement:** `src/ui/GameUI.js` (`showLandmarkSelect`)
+  - Prompts the user to select a Landmark from their deck and a target zone. Bypasses normal mana costs.
+- **Mulligan UX:** `src/ui/GameUI.js` (`showMulliganScreen`)
+  - Handles the UI for selecting which cards to replace.
+- **Mulligan Logic:** `src/engine/TurnManager.js` (`performMulligan`, `checkMulliganComplete`)
+  - Shuffles selected cards back into the deck, draws replacements, and advances to the first turn via `startFirstTurn()`.
+
+---
+
+## 3. The Turn Sequence
+The standard gameplay loop follows a strict phase order: Draw ➔ Main 1 ➔ Battle ➔ Main 2 ➔ End.
+
+The overall tracking of these phases is maintained in `src/engine/GameState.js` (in the `PHASES` enum) and sequenced by `src/engine/TurnManager.js`.
+
+### A. Draw Phase
+**Supporting Code:**
+- **Phase Logic:** `src/engine/TurnManager.js` (`_startDrawPhase`)
+- **Mana Allocation:** `src/engine/ManaSystem.js` (`saveSpellMana`, `gainMana`)
+  - Saves up to 3 unspent generic mana as spell mana, then resets/increases primary mana for the turn.
+- **Card Drawing:** `src/engine/EffectEngine.js` (`drawCards`)
+  - Handles drawing the card and deck-out elimination (if a player tries to draw from an empty deck).
+- **Trigger Events:** Triggers `ON_TURN_START` via `EffectEngine`.
+
+### B. Main Phases (1 & 2)
+During Main phases, players interact freely to play units, spells, traps, landmarks, or change positions.
+
+**Supporting Code:**
+- **Action Execution:** `src/engine/GameController.js`
+  - Features dedicated methods for each action: `playUnit`, `playSpell`, `setSpell`, `setTrap`, `playLandmark`, `activateAbility`, `changePosition`.
+- **Action Validation:** `src/engine/ActionValidator.js`
+  - Checked *before* any action is committed (e.g., `canPlayUnit`, `canPlaySpell`). Verifies mana (`ManaSystem.canAfford`), board space (`player.getEmptyUnitSlot`), phase restrictions, and turn counts.
+- **Effects Triggered:** Summoning a unit triggers `ON_SUMMON` and `ON_OPPONENT_SUMMON` via `src/engine/EffectEngine.js`. Playing a spell triggers `ON_SPELL_ACTIVATE` and `ON_SPELL_PLAY`.
+
+### C. Battle Phase
+The combat phase where units declare attacks and resolve damage.
+
+**Supporting Code:**
+- **Phase Controls:** `src/engine/TurnManager.js` (`startBattlePhase`, `endBattlePhase`).
+- **Attack Declaration & Validation:** `src/engine/ActionValidator.js` (`canDeclareAttack`) and `src/engine/CombatEngine.js` (`canAttack`, `getValidTargets`, `canTarget`). Checks for valid targets, Taunt mechanics (e.g., Jarl), and Shadow mechanics.
+- **Combat Resolution:** `src/engine/CombatEngine.js` (`resolveAttack`)
+  - `_resolveDirectAttack`: Attacker deals damage directly to LP.
+  - `_resolveATKvsATK`: Both units deal damage permanently to each other's DEF. Excess damage pierces to LP.
+  - `_resolveATKvsDEF`: Attacker deals damage; if Attacker's ATK < Defender's DEF, the attacker's owner takes Rebound Damage.
+- **Destruction & Triggers:** Triggers `ON_ATTACK_DECLARE`, `ON_COMBAT_RESOLVED`. Handles Last Breath triggers and specific landmarks (like Arena of Trials) within `_applyOnDestroyEffects`.
+
+### D. End Phase
+The cleanup step at the conclusion of a turn.
+
+**Supporting Code:**
+- **Phase Logic:** `src/engine/TurnManager.js` (`startEndPhase`)
+- **End-of-Turn Triggers:** Triggers `ON_TURN_END`. Resolves specific cards that act at the end of the turn (e.g., Obsidian Guard, Executioner) inside `TurnManager`.
+- **Stat Reset:** `src/engine/EffectEngine.js` (`clearTempEffects`)
+  - Removes "this_turn" stat modifiers (buffs/debuffs) and resets targeting flags.
+- **Hand Limit Enforcement:** `src/engine/TurnManager.js` (`_enforceHandLimit`) forces players to discard down to 8 cards. Then calls `nextTurn()`.
+
+---
+
+## 4. The Effect Engine & Automation
+Rather than hardcoding effects into the UI, the game uses an event-driven engine to resolve card text automatically.
+
+**Supporting Code:**
+- **Core Engine:** `src/engine/EffectEngine.js`
+  - Listens to triggers (e.g., `ON_SUMMON`, `ON_DESTROY`, `ON_DAMAGE_TO_LP`).
+  - Executes stat modifications (`applyTempStatMod`, `applyPermStatMod`), healing (`healLP`, `healUnit`), and damage (`dealDamageToUnit`, `dealDamageToLP`).
+- **Effect Definitions:** `src/effects/NorthernEffects.js`, `WesternEffects.js`, `EasternEffects.js`, `SouthernEffects.js`.
+  - Where the actual logic for a specific card ID (e.g., `N001`, `S012`) is scripted. Loaded dynamically in `main.js`.
+- **UI Interactivity:** If an effect requires the player to choose a target, `EffectEngine` halts resolution and calls `requestTarget` or `requestChoice`, which bubbles up to `GameUI.js` (`showTargetSelection`, `showChoiceDialog`).
+
+---
+
+## 5. Win Conditions & Campaign State
+How the game detects a victor and advances the external campaign.
+
+**Supporting Code:**
+- **In-Game Elimination:** `src/engine/EffectEngine.js` (`_checkWinCondition`)
+  - Triggered whenever LP reaches 0 (`dealDamageToLP`) or a player attempts to draw but has no cards (`drawCards`).
+  - Sets `gameState.gameOver = true` and fires the `GAME_OVER` event.
+- **Campaign Progression:** `src/ui/CampaignUI.js` / `src/ui/WarCampaignUI.js`
+  - Listens for `GAME_OVER`.
+  - Determines the winner, logs the result to `CampaignData` or `WarCampaignData`, awards Victory Points (VP) and Landmark placement rights.
+  - Triggers the next round of Deckbuilding or determines the ultimate campaign victor.
