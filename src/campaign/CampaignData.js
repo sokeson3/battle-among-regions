@@ -26,6 +26,7 @@ export const CAMPAIGN_STAGES = [
         playerLP: 3000,
         difficulty: 'easy',
         region: 'Northern',
+        draftDeckSize: 30,
         reward: 'Access to the Citadel',
     },
     {
@@ -38,6 +39,7 @@ export const CAMPAIGN_STAGES = [
         playerLP: 3000,
         difficulty: 'medium',
         region: 'Northern',
+        draftDeckSize: 40,
         reward: 'Northern Territory Conquered',
     },
 
@@ -52,6 +54,7 @@ export const CAMPAIGN_STAGES = [
         playerLP: 3000,
         difficulty: 'easy',
         region: 'Eastern',
+        draftDeckSize: 30,
         reward: 'Passage to the Monastery',
     },
     {
@@ -64,6 +67,7 @@ export const CAMPAIGN_STAGES = [
         playerLP: 3000,
         difficulty: 'medium',
         region: 'Eastern',
+        draftDeckSize: 30,
         reward: 'Access to the Dragon Temple',
     },
     {
@@ -76,6 +80,7 @@ export const CAMPAIGN_STAGES = [
         playerLP: 3000,
         difficulty: 'hard',
         region: 'Eastern',
+        draftDeckSize: 40,
         reward: 'Eastern Territory Conquered',
     },
 
@@ -90,6 +95,7 @@ export const CAMPAIGN_STAGES = [
         playerLP: 3000,
         difficulty: 'medium',
         region: 'Southern',
+        draftDeckSize: 30,
         reward: 'Passage to the Arena',
     },
     {
@@ -102,6 +108,7 @@ export const CAMPAIGN_STAGES = [
         playerLP: 3000,
         difficulty: 'medium',
         region: 'Southern',
+        draftDeckSize: 30,
         reward: 'Access to the Volcano',
     },
     {
@@ -114,6 +121,7 @@ export const CAMPAIGN_STAGES = [
         playerLP: 3000,
         difficulty: 'hard',
         region: 'Southern',
+        draftDeckSize: 40,
         reward: 'Southern Territory Conquered',
     },
 
@@ -128,6 +136,7 @@ export const CAMPAIGN_STAGES = [
         playerLP: 3000,
         difficulty: 'medium',
         region: 'Western',
+        draftDeckSize: 30,
         reward: 'Passage to the Plains',
     },
     {
@@ -140,6 +149,7 @@ export const CAMPAIGN_STAGES = [
         playerLP: 3000,
         difficulty: 'hard',
         region: 'Western',
+        draftDeckSize: 40,
         reward: 'Access to the Throne',
     },
     {
@@ -152,6 +162,7 @@ export const CAMPAIGN_STAGES = [
         playerLP: 3000,
         difficulty: 'hard',
         region: 'Western',
+        draftDeckSize: 40,
         reward: 'Western Territory Conquered',
     },
 

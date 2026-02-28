@@ -27,20 +27,25 @@ export class GameUI {
     this._pendingPlayAnim = null;   // { rect, imgSrc } captured before play action
     this.pendingPlacement = null;   // Pending placement logic
     this._eventLogCollapsed = false; // Event log UI state
+    this._attackArrowSvg = null;    // SVG element for attack arrow
+    this._attackArrowLine = null;   // SVG line/path for arrow
+    this._attackArrowOrigin = null; // { x, y } origin of attack arrow
 
     // Wire up callbacks
     controller.onUIUpdate = (gs) => this._onUIUpdate(gs);
     controller.effectEngine.onTargetRequired = (targets, desc, cb) => this.showTargetSelection(targets, desc, cb);
     controller.effectEngine.onChoiceRequired = (options, desc, cb) => this.showChoiceDialog(options, desc, cb);
-    controller.onOpponentResponse = (player, callback) => this.showOpponentResponseDialog(player, callback);
+    controller.onOpponentResponse = (player, callback, chainContext) => this.showOpponentResponseDialog(player, callback, chainContext);
   }
 
   // ─── Screen Management ────────────────────────────────────
 
   showMenu() {
     this.currentScreen = 'menu';
+    const isFullscreen = !!document.fullscreenElement;
     this.app.innerHTML = `
       <div class="main-menu">
+        <button class="settings-btn" id="btn-settings" title="Settings">⚙</button>
         <h1 class="menu-title">Battle Among Regions</h1>
         <p class="menu-subtitle">War for Supremacy</p>
         <div class="menu-buttons">
@@ -53,8 +58,64 @@ export class GameUI {
           <button class="menu-btn online-glow" id="btn-online">🌐 Online Match</button>
           <button class="menu-btn tutorial-glow" id="btn-tutorial">📖 Tutorial</button>
         </div>
+
+        <!-- Settings Overlay -->
+        <div class="settings-overlay" id="settings-overlay">
+          <div class="settings-panel">
+            <div class="settings-header">
+              <h2>Settings</h2>
+              <button class="settings-close-btn" id="settings-close">✕</button>
+            </div>
+            <div class="settings-body">
+              <div class="settings-row">
+                <span class="settings-label">Fullscreen</span>
+                <label class="toggle-switch">
+                  <input type="checkbox" id="toggle-fullscreen" ${isFullscreen ? 'checked' : ''}>
+                  <span class="toggle-slider"></span>
+                </label>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
     `;
+
+    // Settings button
+    document.getElementById('btn-settings').onclick = () => {
+      document.getElementById('settings-overlay').classList.add('visible');
+    };
+    document.getElementById('settings-close').onclick = () => {
+      document.getElementById('settings-overlay').classList.remove('visible');
+    };
+    document.getElementById('settings-overlay').onclick = (e) => {
+      if (e.target.id === 'settings-overlay') {
+        e.target.classList.remove('visible');
+      }
+    };
+
+    // Fullscreen toggle
+    document.getElementById('toggle-fullscreen').onchange = async (e) => {
+      try {
+        if (e.target.checked) {
+          await document.documentElement.requestFullscreen();
+        } else {
+          if (document.fullscreenElement) {
+            await document.exitFullscreen();
+          }
+        }
+      } catch (err) {
+        console.warn('Fullscreen toggle failed:', err);
+        e.target.checked = !e.target.checked;
+      }
+    };
+
+    // Sync toggle if user exits fullscreen via Escape key
+    document.onfullscreenchange = () => {
+      const toggle = document.getElementById('toggle-fullscreen');
+      if (toggle) {
+        toggle.checked = !!document.fullscreenElement;
+      }
+    };
 
     document.getElementById('btn-duel').onclick = () => { this.playerCount = 2; this.playerConfigs = []; this.showRegionSelect(0, 'duel'); };
     document.getElementById('btn-3p').onclick = () => { this.playerCount = 3; this.playerConfigs = []; this.showRegionSelect(0, 'duel'); };
@@ -292,7 +353,8 @@ export class GameUI {
         const nextPlayer = gs.getPlayerById(playerIndex + 1);
         this.showTurnTransition(() => this.showLandmarkSelect(playerIndex + 1), nextPlayer);
       } else {
-        this.showTurnTransition(() => this.showMulliganScreen(0));
+        const firstPlayer = gs.getPlayerById(0);
+        this.showTurnTransition(() => this.showMulliganScreen(0), firstPlayer);
       }
     };
 
@@ -303,7 +365,8 @@ export class GameUI {
         const nextPlayer = gs.getPlayerById(playerIndex + 1);
         this.showTurnTransition(() => this.showLandmarkSelect(playerIndex + 1), nextPlayer);
       } else {
-        this.showTurnTransition(() => this.showMulliganScreen(0));
+        const firstPlayer = gs.getPlayerById(0);
+        this.showTurnTransition(() => this.showMulliganScreen(0), firstPlayer);
       }
     };
   }
@@ -342,9 +405,8 @@ export class GameUI {
             `).join('')}
           </div>
           <div style="display:flex;gap:16px;align-items:center">
-            <button class="action-btn primary" id="btn-keep">Keep Hand</button>
-            <button class="action-btn" id="btn-mulligan" ${selectedIds.size === 0 ? 'style="opacity:0.5"' : ''}>
-              Replace ${selectedIds.size} Card${selectedIds.size !== 1 ? 's' : ''}
+            <button class="action-btn primary" id="btn-accept-mulligan">
+              ${selectedIds.size === 0 ? 'Accept Hand' : `Remove ${selectedIds.size} Card${selectedIds.size !== 1 ? 's' : ''}`}
             </button>
           </div>
         </div>
@@ -360,8 +422,8 @@ export class GameUI {
         };
       });
 
-      document.getElementById('btn-keep').onclick = async () => {
-        await this.controller.mulligan(playerIndex, []);
+      document.getElementById('btn-accept-mulligan').onclick = async () => {
+        await this.controller.mulligan(playerIndex, [...selectedIds]);
         if (gs.gameMode === 'campaign') {
           // Auto-mulligan for AI then start
           if (this.campaignUI) await this.campaignUI.handleAIMulligan();
@@ -371,21 +433,6 @@ export class GameUI {
           this.showTurnTransition(() => this.showMulliganScreen(playerIndex + 1), nextPlayer);
         } else {
           this.showTurnTransition();
-        }
-      };
-
-      document.getElementById('btn-mulligan').onclick = async () => {
-        if (selectedIds.size > 0) {
-          await this.controller.mulligan(playerIndex, [...selectedIds]);
-          if (gs.gameMode === 'campaign') {
-            if (this.campaignUI) await this.campaignUI.handleAIMulligan();
-            this.showTurnTransition();
-          } else if (playerIndex < gs.players.length - 1) {
-            const nextPlayer = gs.getPlayerById(playerIndex + 1);
-            this.showTurnTransition(() => this.showMulliganScreen(playerIndex + 1), nextPlayer);
-          } else {
-            this.showTurnTransition();
-          }
         }
       };
     };
@@ -1025,6 +1072,24 @@ export class GameUI {
       };
     });
 
+    // Attack arrow: when attackingUnit is set, show SVG arrow from attacker to cursor
+    if (this.attackingUnit) {
+      this._createAttackArrow();
+      const arrowMoveHandler = (e) => {
+        const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+        const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+        this._updateAttackArrow(clientX, clientY);
+      };
+      document.addEventListener('mousemove', arrowMoveHandler);
+      document.addEventListener('touchmove', arrowMoveHandler);
+      this._attackArrowCleanup = () => {
+        document.removeEventListener('mousemove', arrowMoveHandler);
+        document.removeEventListener('touchmove', arrowMoveHandler);
+      };
+    } else {
+      this._removeAttackArrow();
+    }
+
     // Field slot clicks for placement
     document.querySelectorAll('.card-slot, .landmark-slot').forEach(el => {
       el.onclick = (e) => {
@@ -1094,11 +1159,14 @@ export class GameUI {
         if (targetPlayer && targetPlayer.isAlive) {
           el.style.cursor = 'pointer';
           el.onclick = () => {
+            const attackerUnit = activePlayer.getFieldUnits().find(u => u.instanceId === this.attackingUnit);
+            this._showAttackAnimation(attackerUnit, null, targetPlayer);
             this.controller.declareAttack(activePlayer.id, this.attackingUnit, {
               type: 'direct',
               player: targetPlayer,
             }).then(result => {
               this.attackingUnit = null;
+              this._removeAttackArrow();
               if (!result.success) this._showToast(result.reason);
             });
           };
@@ -1134,6 +1202,7 @@ export class GameUI {
     if (btnCancelAction) btnCancelAction.onclick = () => {
       this.attackingUnit = null;
       this.pendingPlacement = null;
+      this._removeAttackArrow();
       this.render();
     };
 
@@ -1415,12 +1484,16 @@ export class GameUI {
   _onAttackTargetClick(instanceId, playerId, opponent, gs) {
     const target = opponent.getFieldUnits().find(u => u.instanceId === instanceId);
     if (target) {
+      const activePlayer = gs.getActivePlayer();
+      const attackerUnit = activePlayer.getFieldUnits().find(u => u.instanceId === this.attackingUnit);
+      this._showAttackAnimation(attackerUnit, target, null);
       this.controller.declareAttack(gs.activePlayerIndex, this.attackingUnit, {
         type: 'unit',
         card: target,
         player: opponent,
       }).then(result => {
         this.attackingUnit = null;
+        this._removeAttackArrow();
         if (!result.success) this._showToast(result.reason);
       });
     }
@@ -1434,29 +1507,60 @@ export class GameUI {
       return;
     }
 
-    // Auto-select if only one target
-    if (targets.length === 1) {
-      callback(targets[0]);
-      return;
-    }
-
-    // Show choice dialog with target names
+    // Always show choice dialog with target names (even for single targets)
     const options = targets.map((t, i) => ({
       label: t.name || t.card?.name || `Target ${i + 1}`,
       value: i,
       cardId: t.cardId || t.card?.cardId || null,
     }));
 
-    this.showChoiceDialog(options, description, (choice) => {
-      callback(targets[choice.value] || null);
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:200;display:flex;align-items:center;justify-content:center';
+
+    overlay.innerHTML = `
+      <div class="choice-dialog">
+        <h3>${description}</h3>
+        <div class="choice-options" style="display:flex;flex-wrap:wrap;gap:10px;justify-content:center;max-width:600px">
+          ${options.map((opt, i) => {
+      const cardId = opt.cardId || (typeof opt.value === 'string' && opt.value.match(/^[A-Z]\d{3}$/) ? opt.value : null);
+      if (cardId || targets[i]?.cardId) {
+        const cId = cardId || targets[i].cardId;
+        return `
+                <div class="choice-option" data-idx="${i}" style="display:flex;flex-direction:column;align-items:center;padding:8px;max-width:120px">
+                  <img src="./output-web/${cId}.webp" alt="${opt.label}" style="width:80px;height:112px;object-fit:contain;border-radius:6px;margin-bottom:6px;border:1px solid var(--glass-border)" />
+                  <span style="font-size:0.7rem;text-align:center">${opt.label}</span>
+                </div>
+              `;
+      }
+      return `<div class="choice-option" data-idx="${i}">${opt.label}</div>`;
+    }).join('')}
+        </div>
+        <button class="menu-btn target-cancel-btn" style="margin-top:16px;padding:10px 28px;opacity:0.8">✕ Cancel</button>
+      </div>
+    `;
+
+    this.app.appendChild(overlay);
+
+    overlay.querySelectorAll('.choice-option').forEach(el => {
+      el.onclick = () => {
+        const idx = parseInt(el.dataset.idx);
+        overlay.remove();
+        callback(targets[idx]);
+      };
     });
+
+    // Cancel button — returns null to cancel the effect
+    overlay.querySelector('.target-cancel-btn').onclick = () => {
+      overlay.remove();
+      callback(null);
+    };
   }
 
   // ─── Choice Dialog ────────────────────────────────────────
 
   showChoiceDialog(options, description, callback) {
     const overlay = document.createElement('div');
-    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:65;display:flex;align-items:center;justify-content:center';
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:200;display:flex;align-items:center;justify-content:center';
 
     overlay.innerHTML = `
       <div class="choice-dialog">
@@ -1492,8 +1596,10 @@ export class GameUI {
 
   // ─── Opponent Response Dialog ────────────────────────────
 
-  showOpponentResponseDialog(player, callback) {
-    const faceDownCards = player.getFaceDownCards().filter(c => c.type === 'Spell' || c.type === 'Trap');
+  showOpponentResponseDialog(player, callback, chainContext = {}) {
+    const faceDownCards = player.getFaceDownCards().filter(c =>
+      (c.type === 'Spell' || c.type === 'Trap') && !c.setThisTurn
+    );
     if (faceDownCards.length === 0) {
       callback({ activate: false });
       return;
@@ -1502,26 +1608,80 @@ export class GameUI {
     const overlay = document.createElement('div');
     overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:70;display:flex;align-items:center;justify-content:center';
 
-    // Check which cards can be activated (mana check)
+    // Check which cards can be activated (mana check + condition check)
     const validator = this.controller.actionValidator;
+    const effectEngine = this.controller.effectEngine;
+    const triggerContext = chainContext.triggerContext || {};
+    const triggerType = chainContext.triggerType || 'action';
+    const chainStack = chainContext.chainStack || [];
+
     const cardStates = faceDownCards.map(card => {
       let canActivate = false;
+      let reason = '';
       if (card.type === 'Trap') {
-        canActivate = validator.canActivateTrap(player.id, card).valid;
+        const result = validator.canActivateTrap(player.id, card, {
+          effectEngine,
+          triggerContext
+        });
+        canActivate = result.valid;
+        reason = result.reason || '';
       } else if (card.type === 'Spell') {
-        canActivate = validator.canActivateSetSpell(player.id, card).valid;
+        const result = validator.canActivateSetSpell(player.id, card);
+        canActivate = result.valid;
+        reason = result.reason || '';
       }
-      return { card, canActivate };
+      return { card, canActivate, reason };
     });
+
+    // Build trigger description for context
+    let triggerDesc = 'an action was performed';
+    if (triggerType === 'attack') triggerDesc = 'an attack was declared';
+    else if (triggerType === 'summon') triggerDesc = 'a unit was summoned';
+    else if (triggerType === 'spell') triggerDesc = 'a spell was activated';
+    else if (triggerType === 'phase_change') triggerDesc = 'a phase change occurred';
+
+    const chainInfo = chainStack.length > 0
+      ? `<p style="color:var(--text-muted);font-size:0.7rem;margin-bottom:8px">Chain: ${chainStack.map(c => c.card.name).join(' → ')}</p>`
+      : '';
+
+    // Build attack context info showing attacker and target
+    let attackContextHtml = '';
+    if (triggerType === 'attack' && triggerContext.attacker) {
+      const atkCard = triggerContext.attacker;
+      const targetInfo = triggerContext.target;
+      let targetHtml = '';
+      if (targetInfo?.type === 'unit' && targetInfo.card) {
+        targetHtml = `
+          <div class="attack-context-card">
+            <img src="./output-web/${targetInfo.card.cardId}.webp" alt="${targetInfo.card.name}" />
+            <span>${targetInfo.card.name}</span>
+          </div>
+        `;
+      } else if (targetInfo?.type === 'direct') {
+        targetHtml = `<div class="attack-context-card"><span style="font-size:1.5rem">💥</span><span>Direct Attack</span></div>`;
+      }
+      attackContextHtml = `
+        <div class="attack-context-row">
+          <div class="attack-context-card">
+            <img src="./output-web/${atkCard.cardId}.webp" alt="${atkCard.name}" />
+            <span>${atkCard.name}</span>
+          </div>
+          <span class="attack-context-arrow">⚔→</span>
+          ${targetHtml}
+        </div>
+      `;
+    }
 
     overlay.innerHTML = `
       <div class="choice-dialog response-card-dialog">
-        <h3 style="color:var(--gold)">${player.name} — Activate a face-down card?</h3>
-        <p style="color:var(--text-muted);font-size:0.8rem;margin-bottom:16px">
-          You have ${faceDownCards.length} face-down card(s). Hover to inspect, then choose an action.
+        <h3 style="color:var(--gold)">${player.name} — Respond?</h3>
+        <p style="color:var(--text-muted);font-size:0.8rem;margin-bottom:8px">
+          ${triggerDesc.charAt(0).toUpperCase() + triggerDesc.slice(1)}. Activate a face-down card?
         </p>
+        ${attackContextHtml}
+        ${chainInfo}
         <div class="response-cards-row">
-          ${cardStates.map(({ card, canActivate }) => `
+          ${cardStates.map(({ card, canActivate, reason }) => `
             <div class="response-card-wrapper" data-instance="${card.instanceId}">
               <div class="response-card-img-wrap">
                 <img src="./output-web/${card.cardId}.webp" alt="${card.name}" class="response-card-img" />
@@ -1531,7 +1691,7 @@ export class GameUI {
               <div class="response-card-buttons">
                 ${canActivate
         ? `<button class="menu-btn primary resp-activate-btn" data-instance="${card.instanceId}" style="padding:6px 14px;font-size:0.75rem">⚡ Activate</button>`
-        : `<span class="response-card-no-mana">Not enough mana</span>`
+        : `<span class="response-card-no-mana">${reason || 'Cannot activate'}</span>`
       }
                 <button class="menu-btn resp-view-btn" data-card-id="${card.cardId}" style="padding:6px 14px;font-size:0.75rem;opacity:0.8">🔍 View Details</button>
               </div>
@@ -1775,6 +1935,125 @@ export class GameUI {
     };
     document.addEventListener('keydown', escHandler);
   }
+
+  // ─── Attack Arrow (SVG) ────────────────────────────────────
+
+  _createAttackArrow() {
+    this._removeAttackArrow();
+
+    // Find the attacking unit element
+    const attackerEl = document.querySelector(`.game-card[data-instance="${this.attackingUnit}"]`);
+    if (!attackerEl) return;
+
+    const rect = attackerEl.getBoundingClientRect();
+    const originX = rect.left + rect.width / 2;
+    const originY = rect.top + rect.height / 2;
+    this._attackArrowOrigin = { x: originX, y: originY };
+
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('class', 'attack-arrow-svg');
+    svg.setAttribute('width', '100%');
+    svg.setAttribute('height', '100%');
+    svg.style.cssText = 'position:fixed;inset:0;z-index:60;pointer-events:none;';
+    svg.innerHTML = `
+      <defs>
+        <linearGradient id="arrow-grad" x1="0%" y1="0%" x2="100%" y2="0%">
+          <stop offset="0%" style="stop-color:#ff2222;stop-opacity:0.9"/>
+          <stop offset="50%" style="stop-color:#ff4444;stop-opacity:1"/>
+          <stop offset="100%" style="stop-color:#ff6666;stop-opacity:1"/>
+        </linearGradient>
+        <marker id="arrowhead" markerWidth="12" markerHeight="10" refX="10" refY="5" orient="auto">
+          <polygon points="0 0, 12 5, 0 10" fill="url(#arrow-grad)" />
+        </marker>
+        <filter id="arrow-glow">
+          <feGaussianBlur stdDeviation="3" result="blur"/>
+          <feMerge>
+            <feMergeNode in="blur"/>
+            <feMergeNode in="SourceGraphic"/>
+          </feMerge>
+        </filter>
+      </defs>
+      <line id="attack-arrow-line"
+        x1="${originX}" y1="${originY}"
+        x2="${originX}" y2="${originY}"
+        stroke="url(#arrow-grad)" stroke-width="4"
+        stroke-linecap="round" stroke-dasharray="8 4"
+        marker-end="url(#arrowhead)"
+        filter="url(#arrow-glow)"
+        opacity="0.9"
+      />
+    `;
+
+    document.body.appendChild(svg);
+    this._attackArrowSvg = svg;
+    this._attackArrowLine = svg.querySelector('#attack-arrow-line');
+  }
+
+  _updateAttackArrow(x, y) {
+    if (this._attackArrowLine && this._attackArrowOrigin) {
+      this._attackArrowLine.setAttribute('x2', x);
+      this._attackArrowLine.setAttribute('y2', y);
+    }
+  }
+
+  _removeAttackArrow() {
+    if (this._attackArrowSvg) {
+      this._attackArrowSvg.remove();
+      this._attackArrowSvg = null;
+      this._attackArrowLine = null;
+      this._attackArrowOrigin = null;
+    }
+    if (this._attackArrowCleanup) {
+      this._attackArrowCleanup();
+      this._attackArrowCleanup = null;
+    }
+  }
+
+  // ─── Attack Declaration Animation ─────────────────────────
+
+  _showAttackAnimation(attacker, targetUnit, targetPlayer) {
+    if (!attacker) return;
+
+    const overlay = document.createElement('div');
+    overlay.className = 'attack-anim-overlay';
+
+    let targetHtml = '';
+    if (targetUnit) {
+      targetHtml = `
+        <div class="attack-anim-card">
+          <img src="./output-web/${targetUnit.cardId}.webp" alt="${targetUnit.name}" />
+          <span>${targetUnit.name}</span>
+        </div>
+      `;
+    } else if (targetPlayer) {
+      targetHtml = `
+        <div class="attack-anim-card attack-anim-direct">
+          <span class="attack-anim-lp-icon">💥</span>
+          <span>${targetPlayer.name}</span>
+        </div>
+      `;
+    }
+
+    overlay.innerHTML = `
+      <div class="attack-anim-content">
+        <div class="attack-anim-card">
+          <img src="./output-web/${attacker.cardId}.webp" alt="${attacker.name}" />
+          <span>${attacker.name}</span>
+        </div>
+        <div class="attack-anim-slash">⚔</div>
+        ${targetHtml}
+      </div>
+    `;
+
+    document.body.appendChild(overlay);
+
+    // Auto-remove after animation
+    setTimeout(() => {
+      overlay.classList.add('attack-anim-fade');
+      setTimeout(() => overlay.remove(), 400);
+    }, 800);
+  }
+
   _showGraveyardViewer(player) {
     if (!player.graveyard || player.graveyard.length === 0) {
       this._showToast(`${player.name}'s graveyard is empty.`);

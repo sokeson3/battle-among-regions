@@ -161,6 +161,7 @@ export class EffectEngine {
 
     /**
      * Resolve a single effect, potentially requesting targets from UI
+     * @returns {{ cancelled: boolean }} result
      */
     async _resolveEffect(effect, context) {
         if (effect.requiresTarget && this.onTargetRequired) {
@@ -168,14 +169,15 @@ export class EffectEngine {
             const validTargets = effect.targets ? effect.targets(this.gameState, context) : [];
             if (validTargets.length === 0 && effect.requiresTarget) {
                 this.gameState.log('EFFECT', `${context.source?.name || 'Effect'}: No valid targets available.`);
-                return;
+                return { cancelled: true };
             }
 
             const target = await this.requestTarget(validTargets, effect.description || effect.id);
             if (target) {
                 context.target = target;
-            } else if (effect.isOptional) {
-                return; // Player chose not to use optional effect
+            } else {
+                // Player cancelled target selection
+                return { cancelled: true };
             }
         }
 
@@ -184,6 +186,7 @@ export class EffectEngine {
         } catch (err) {
             console.error(`[EffectEngine] Error resolving effect ${effect.id}:`, err);
         }
+        return { cancelled: false };
     }
 
     /**
@@ -290,6 +293,13 @@ export class EffectEngine {
         target.damageTaken += amount;
         this.gameState.log('DAMAGE', `${target.name} takes ${amount} damage from ${source} (${target.damageTaken}/${target.currentDEF} damage taken)`);
         this.gameState.emit('UNIT_DAMAGED', { target, amount, source });
+
+        // Check if the unit should be destroyed (DEF reduced to 0)
+        if (target.damageTaken >= target.currentDEF) {
+            this.gameState.log('DESTROY', `${target.name} is destroyed by ${source}!`);
+            this.destroyUnit(target);
+        }
+
         return amount;
     }
 

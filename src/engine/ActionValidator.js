@@ -153,6 +153,7 @@ export class ActionValidator {
         if (!player) return { valid: false, reason: 'Invalid player.' };
         if (cardInstance.type !== 'Spell') return { valid: false, reason: 'Card is not a Spell.' };
         if (cardInstance.faceUp) return { valid: false, reason: 'Card is already face-up.' };
+        if (cardInstance.setThisTurn) return { valid: false, reason: 'Cannot activate a card the same turn it was set.' };
 
         // Pay mana cost when activating
         if (!this.manaSystem.canAfford(playerId, cardInstance.manaCost, true)) {
@@ -164,12 +165,16 @@ export class ActionValidator {
 
     /**
      * Check if a face-down trap can be activated
+     * @param {number} playerId
+     * @param {Object} cardInstance
+     * @param {Object} [options] - Optional: { triggerContext, effectEngine }
      */
-    canActivateTrap(playerId, cardInstance) {
+    canActivateTrap(playerId, cardInstance, options = {}) {
         const player = this.gameState.getPlayerById(playerId);
         if (!player) return { valid: false, reason: 'Invalid player.' };
         if (cardInstance.type !== 'Trap') return { valid: false, reason: 'Card is not a Trap.' };
         if (cardInstance.faceUp) return { valid: false, reason: 'Card is already face-up.' };
+        if (cardInstance.setThisTurn) return { valid: false, reason: 'Cannot activate a Trap the same turn it was set.' };
 
         // Pay mana cost when activating
         if (!this.manaSystem.canAfford(playerId, cardInstance.manaCost, true)) {
@@ -185,6 +190,32 @@ export class ActionValidator {
                     if (player.lp < 400) {
                         return { valid: false, reason: 'Must pay 400 LP to activate Traps (Enigmatic Sensei) but not enough LP.' };
                     }
+                }
+            }
+        }
+
+        // If we have an effect engine and trigger context, check if the trap's effect conditions are met
+        if (options.effectEngine && options.triggerContext) {
+            const { effectEngine, triggerContext } = options;
+            const effects = effectEngine.getEffects(cardInstance.cardId);
+            if (effects.length > 0) {
+                // Check if at least one effect's condition is satisfied
+                const hasMatchingCondition = effects.some(effect => {
+                    // If the effect has no condition, it's always valid
+                    if (!effect.condition) return true;
+                    // Check the condition with current context
+                    try {
+                        return effect.condition(this.gameState, {
+                            ...triggerContext,
+                            source: cardInstance,
+                            sourcePlayer: player
+                        });
+                    } catch (e) {
+                        return false;
+                    }
+                });
+                if (!hasMatchingCondition) {
+                    return { valid: false, reason: 'Trap conditions are not met.' };
                 }
             }
         }

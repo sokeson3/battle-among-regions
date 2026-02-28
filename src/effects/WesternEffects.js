@@ -558,6 +558,7 @@ export function register(effectEngine, cardDB) {
             trigger: 'SELF',
             description: 'Swap a unit\'s ATK and DEF',
             requiresTarget: true,
+            targetType: 'any_unit',
             targets: (gs) => gs.getAllFieldUnits(),
             execute: (gs, ctx, ee) => {
                 if (ctx.target) {

@@ -140,6 +140,11 @@ export class TurnManager {
         activePlayer.unitsSummonedThisTurn = 0;
         activePlayer.spellsPlayedThisTurn = 0;
 
+        // Clear setThisTurn for all face-down cards (they were set last turn)
+        for (const card of activePlayer.spellTrapZone) {
+            if (card) card.setThisTurn = false;
+        }
+
         // Reset "once per round" flags for all units when round changes
         if (gs.activePlayerIndex === gs.startingPlayerIndex) {
             for (const player of gs.players) {
@@ -280,10 +285,10 @@ export class TurnManager {
                 const slotIdx = player.unitZone.indexOf(unit);
                 if (slotIdx >= 0) {
                     const adjacent = [slotIdx - 1, slotIdx + 1]
-                        .filter(i => i >= 0 && i < 5 && player.unitZone[i])
+                        .filter(i => i >= 0 && i < 5 && player.unitZone[i] && player.unitZone[i].instanceId !== unit.instanceId)
                         .map(i => player.unitZone[i]);
                     if (adjacent.length > 0) {
-                        // Apply to the first adjacent unit (or could request target)
+                        // Apply to the first adjacent unit (cannot target itself)
                         this.effectEngine.applyPermStatMod(adjacent[0], 0, 100, 'Aurora Sentinel');
                     }
                 }

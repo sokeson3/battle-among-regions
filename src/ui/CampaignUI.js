@@ -282,40 +282,64 @@ export class CampaignUI {
                 currentDeckSize: savedDeckSize,
                 targetDeckSize: targetDeckSize,
                 mustStartOwn: true,
+                existingDeckCardIds: this.progress.savedDeckCardIds,
             });
 
             this._playerDraftedDeck = [...this.progress.savedDeckCardIds, ...playerPicks];
         } else {
             // ─── Single-Region Draft (stages 1–12) ────────
-            // Pool is only from the opponent's region
-            // Both player and AI draft independently from the full pool
-            const regionCards = cardDB.getCardsByRegion(stage.opponentRegion)
-                .filter(c => c.type !== 'Token' && c.quantity > 0);
-
-            const pool = [];
-            for (const card of regionCards) {
-                for (let copy = 0; copy < card.quantity; copy++) {
-                    pool.push({ ...card, draftId: `${card.id}_draft_${draftIdCounter++}` });
+            // Pool is from ALL regions so the player can build from any region
+            // AI drafts independently, and its cards are excluded from player pool
+            let draftIdCounter2 = 0;
+            const fullPool = [];
+            for (const region of allRegions) {
+                const regionCards = cardDB.getCardsByRegion(region)
+                    .filter(c => c.type !== 'Token' && c.quantity > 0);
+                for (const card of regionCards) {
+                    for (let copy = 0; copy < card.quantity; copy++) {
+                        fullPool.push({ ...card, draftId: `${card.id}_draft_${draftIdCounter++}` });
+                    }
                 }
             }
 
-            // AI auto-drafts independently (its own copy of the pool)
+            // AI auto-drafts from the opponent's region
+            const aiPool = fullPool.filter(c => c.region === stage.opponentRegion);
             this._aiDraftedDeck = this._aiAutoDraft(
-                pool.map(p => ({ ...p })), targetDeckSize
+                aiPool.map(p => ({ ...p })), targetDeckSize
             );
 
-            // Player gets the full pool — no exclusions for single-region
+            // Build player pool: all regions, minus cards the AI took
+            const aiCardCounts = {};
+            for (const cardId of this._aiDraftedDeck) {
+                aiCardCounts[cardId] = (aiCardCounts[cardId] || 0) + 1;
+            }
+
+            // Remove AI-picked cards from pool
+            const playerPool = [];
+            const usedCounts = {};
+            for (const entry of fullPool) {
+                const aiCount = aiCardCounts[entry.id] || 0;
+                usedCounts[entry.id] = (usedCounts[entry.id] || 0) + 1;
+                if (usedCounts[entry.id] > aiCount) {
+                    // Only include landmarks from the player's own region
+                    if (entry.type === 'Landmark' && entry.region !== playerRegion) continue;
+                    playerPool.push(entry);
+                }
+            }
+
+            // Player gets the pool minus AI cards
             const savedDeckSize = this.progress.savedDeckCardIds.length;
             const remainingPicks = Math.max(0, targetDeckSize - savedDeckSize);
 
             const playerPicks = await this.deckBuilder.showDraftPick({
                 playerName: 'You',
-                playerRegion: stage.opponentRegion, // Draft from opponent's region
-                available: pool,
+                playerRegion: playerRegion,
+                available: playerPool,
                 maxPicks: remainingPicks,
                 currentDeckSize: savedDeckSize,
                 targetDeckSize: targetDeckSize,
                 mustStartOwn: false,
+                existingDeckCardIds: this.progress.savedDeckCardIds,
             });
 
             this._playerDraftedDeck = [...this.progress.savedDeckCardIds, ...playerPicks];
@@ -418,6 +442,7 @@ export class CampaignUI {
         // Override the controller's target/choice callbacks for AI player
         const origOnTarget = this.controller.onTargetRequired;
         const origOnChoice = this.controller.onChoiceRequired;
+        const origOnResponse = this.controller.onOpponentResponse;
 
         this.controller.onTargetRequired = (targets, desc, cb) => {
             if (gs.activePlayerIndex === 1 && this.ai) {
@@ -435,6 +460,22 @@ export class CampaignUI {
                 setTimeout(() => cb(choice), 100);
             } else if (origOnChoice) {
                 origOnChoice(options, desc, cb);
+            }
+        };
+
+        // Override response callback: AI always auto-passes,
+        // and human auto-passes during AI's turn to prevent 'Not your turn' issues
+        this.controller.onOpponentResponse = (player, callback, chainContext) => {
+            if (player.id === 1) {
+                // AI auto-passes on response prompts
+                setTimeout(() => callback({ activate: false }), 50);
+            } else if (gs.activePlayerIndex === 1) {
+                // Human player auto-passes during AI's turn
+                setTimeout(() => callback({ activate: false }), 50);
+            } else if (origOnResponse) {
+                origOnResponse(player, callback, chainContext);
+            } else {
+                callback({ activate: false });
             }
         };
     }
@@ -520,7 +561,7 @@ export class CampaignUI {
         const turns = gs.turnCounter;
 
         if (playerWon) {
-            // Save the player's deck for the next stage
+            // Save the player's deck for the next stage (exclude landmark & tokens)
             const playerObj = gs.getPlayerById(0);
             const deckCardIds = [
                 ...playerObj.deck.map(c => c.cardId),
@@ -528,8 +569,10 @@ export class CampaignUI {
                 ...playerObj.unitZone.filter(Boolean).map(c => c.cardId),
                 ...playerObj.spellTrapZone.filter(Boolean).map(c => c.cardId),
                 ...playerObj.graveyard.map(c => c.cardId),
-            ];
-            if (playerObj.landmarkZone) deckCardIds.push(playerObj.landmarkZone.cardId);
+            ].filter(id => {
+                const def = this.controller.cardDB.getCard(id);
+                return def && def.type !== 'Token' && def.type !== 'Landmark';
+            });
             this.progress.savedDeckCardIds = deckCardIds;
             this.progress.completeStage(stage.id, { lpRemaining: playerLP, turns });
         }

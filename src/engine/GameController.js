@@ -96,6 +96,13 @@ export class GameController {
             ? slotIndex
             : player.getEmptyUnitSlot();
 
+        if (slot < 0) {
+            // No valid slot — refund mana and return card to hand
+            this.manaSystem.addMana(playerId, card.manaCost);
+            player.hand.push(card);
+            return { success: false, reason: 'No empty Unit Zone slots available.' };
+        }
+
         card.position = position;
         card.faceUp = position === 'ATK';
         card.summonedThisTurn = true;
@@ -123,8 +130,8 @@ export class GameController {
             summoningPlayer: player,
         });
 
-        // Ask opponent if they want to respond
-        await this._askOpponentResponse();
+        // Ask players if they want to respond
+        await this._askOpponentResponse('summon', { summonedCard: card, summoningPlayer: player, isSecondSummon: player.unitsSummonedThisTurn >= 2 });
 
         this._notifyUI();
         return { success: true, card, slot };
@@ -165,10 +172,25 @@ export class GameController {
 
         // Execute the spell's own effect
         const effects = this.effectEngine.getEffects(card.cardId);
+        let cancelled = false;
         for (const effect of effects) {
             if (effect.trigger === EFFECT_EVENTS.ON_SPELL_ACTIVATE || effect.trigger === 'SELF') {
-                await this.effectEngine._resolveEffect(effect, { source: card, sourcePlayer: player });
+                const result = await this.effectEngine._resolveEffect(effect, { source: card, sourcePlayer: player });
+                if (result && result.cancelled) {
+                    cancelled = true;
+                    break;
+                }
             }
+        }
+
+        // If the player cancelled target selection, refund everything
+        if (cancelled) {
+            this.manaSystem.addMana(playerId, card.manaCost);
+            player.hand.push(card);
+            player.spellsPlayedThisTurn--;
+            this.gameState.log('CANCEL', `${player.name} cancelled ${card.name}.`);
+            this._notifyUI();
+            return { success: false, reason: 'Spell cancelled.' };
         }
 
         // Send to graveyard
@@ -180,8 +202,8 @@ export class GameController {
             caster: player,
         });
 
-        // Ask opponent if they want to respond
-        await this._askOpponentResponse();
+        // Ask players if they want to respond
+        await this._askOpponentResponse('spell', { spell: card, caster: player });
 
         this._notifyUI();
         return { success: true, card };
@@ -207,6 +229,7 @@ export class GameController {
             : player.getEmptySpellTrapSlot();
 
         card.faceUp = false;
+        card.setThisTurn = true;
         player.spellTrapZone[slot] = card;
 
         this.gameState.log('SET', `${player.name} sets a card face-down.`);
@@ -236,6 +259,7 @@ export class GameController {
             : player.getEmptySpellTrapSlot();
 
         card.faceUp = false;
+        card.setThisTurn = true;
         player.spellTrapZone[slot] = card;
 
         this.gameState.log('SET', `${player.name} sets a Trap face-down.`);
@@ -348,6 +372,9 @@ export class GameController {
             caster: player,
         });
 
+        // Ask players if they want to respond
+        await this._askOpponentResponse('spell', { spell: card, caster: player });
+
         this._notifyUI();
         return { success: true, card };
     }
@@ -371,8 +398,8 @@ export class GameController {
         // Initialize battle state
         this.gameState.battleState = { attackNegated: false, battlePhaseEnded: false };
 
-        // Ask opponent if they want to respond before battle resolves
-        await this._askOpponentResponse();
+        // Ask players if they want to respond before battle resolves
+        await this._askOpponentResponse('attack', { attacker, attackerOwner: player, target: targetInfo });
 
         // Resolve the attack (unless negated by response)
         if (!this.gameState.battleState.attackNegated) {
@@ -413,6 +440,9 @@ export class GameController {
             }
         }
 
+        // Ask players if they want to respond
+        await this._askOpponentResponse('ability', { abilityCard: card, caster: player });
+
         this._notifyUI();
         return { success: true };
     }
@@ -422,8 +452,8 @@ export class GameController {
      */
     async enterBattlePhase() {
         const result = await this.turnManager.startBattlePhase();
-        // Ask opponent if they want to respond to phase change
-        await this._askOpponentResponse();
+        // Ask players if they want to respond to phase change
+        await this._askOpponentResponse('phase_change', { phase: 'BATTLE' });
         this._notifyUI();
         return result;
     }
@@ -489,35 +519,75 @@ export class GameController {
     }
 
     /**
-     * Ask each opponent if they want to activate a card effect.
-     * Triggers the onOpponentResponse callback for each opponent with face-down cards.
+     * Ask players if they want to activate a card effect in response.
+     * Implements a chain system: after each activation, the other player can respond.
+     * @param {string} triggerType - What triggered this response opportunity (e.g. 'summon', 'attack', 'spell', 'phase_change')
+     * @param {Object} triggerContext - Context data about the trigger (attacker, spell, etc.)
      */
-    async _askOpponentResponse() {
+    async _askOpponentResponse(triggerType = 'action', triggerContext = {}) {
+        if (!this.onOpponentResponse) return;
+        await this._resolveChain(triggerType, triggerContext);
+    }
+
+    /**
+     * Resolve a chain of responses. Players alternate responding until both pass.
+     * Then the chain resolves in LIFO (last-in-first-out) order.
+     */
+    async _resolveChain(triggerType = 'action', triggerContext = {}) {
         if (!this.onOpponentResponse) return;
         const gs = this.gameState;
         const activeId = gs.activePlayerIndex;
+        const chainStack = [];
 
+        // Build initial player order: opponents first, then active player
+        const playerOrder = [];
         for (const player of gs.players) {
-            if (player.id === activeId || !player.isAlive) continue;
+            if (player.id !== activeId && player.isAlive) playerOrder.push(player);
+        }
+        // Active player can also respond with their set cards
+        const activePlayer = gs.getActivePlayer();
+        if (activePlayer && activePlayer.isAlive) playerOrder.push(activePlayer);
 
-            // Check if opponent has any face-down spells or traps they could activate
+        let consecutivePasses = 0;
+        let currentPlayerIdx = 0;
+
+        while (consecutivePasses < playerOrder.length) {
+            const player = playerOrder[currentPlayerIdx % playerOrder.length];
+
+            // Check if player has any face-down spells or traps they could activate
             const faceDownCards = player.getFaceDownCards().filter(c => c.type === 'Spell' || c.type === 'Trap');
-            if (faceDownCards.length === 0) continue;
+            if (faceDownCards.length === 0) {
+                consecutivePasses++;
+                currentPlayerIdx++;
+                continue;
+            }
 
-            // Ask the opponent via the UI callback
+            // Ask the player via the UI callback, passing trigger context
             const response = await new Promise(resolve => {
-                this.onOpponentResponse(player, resolve);
+                this.onOpponentResponse(player, resolve, { triggerType, triggerContext, chainStack });
             });
 
             if (response && response.activate && response.cardInstanceId) {
-                // Find the card to determine its type
                 const card = faceDownCards.find(c => c.instanceId === response.cardInstanceId);
-                if (card && card.type === 'Trap') {
-                    await this.activateTrap(player.id, response.cardInstanceId);
+                if (card) {
+                    // Add to chain stack for LIFO resolution
+                    chainStack.push({ playerId: player.id, cardInstanceId: response.cardInstanceId, card });
+                    consecutivePasses = 0; // Reset passes — other player can now respond
+
+                    // Execute the card immediately (activation costs mana, flips face-up, triggers effect)
+                    if (card.type === 'Trap') {
+                        await this.activateTrap(player.id, response.cardInstanceId);
+                    } else {
+                        await this.activateSetSpell(player.id, response.cardInstanceId);
+                    }
                 } else {
-                    await this.activateSetSpell(player.id, response.cardInstanceId);
+                    consecutivePasses++;
                 }
+            } else {
+                consecutivePasses++;
             }
+
+            currentPlayerIdx++;
         }
     }
 

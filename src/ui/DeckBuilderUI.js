@@ -41,11 +41,13 @@ export class DeckBuilderUI {
       currentDeckSize,
       targetDeckSize,
       mustStartOwn = false,
+      existingDeckCardIds = [],
     } = opts;
 
     return new Promise(resolve => {
       const selected = new Set();        // Set of draftIds
       let hasPickedFromOwn = !mustStartOwn; // If not required, treat as satisfied
+      let showExistingDeck = false;      // Toggle for existing deck section
 
       const regionOrder = [playerRegion, ...['Northern', 'Eastern', 'Southern', 'Western'].filter(r => r !== playerRegion)];
 
@@ -66,6 +68,46 @@ export class DeckBuilderUI {
           regionGroups[region] = available.filter(c => c.region === region);
         }
 
+        // Build existing deck HTML if there are saved cards
+        let existingDeckHTML = '';
+        if (existingDeckCardIds.length > 0) {
+          const existingCards = existingDeckCardIds.map(id => {
+            const all = this.cardDb.getAllPlayableCards ? this.cardDb.getAllPlayableCards() : [];
+            return all.find(c => c.id === id);
+          }).filter(Boolean);
+
+          existingDeckHTML = `
+            <div class="existing-deck-section">
+              <h3 class="existing-deck-toggle" id="toggle-existing-deck" style="
+                color:var(--gold);margin:8px 0;font-family:Cinzel,serif;cursor:pointer;
+                display:flex;align-items:center;gap:8px;user-select:none;
+              ">
+                <span style="transition:transform 0.2s;display:inline-block;transform:rotate(${showExistingDeck ? '90deg' : '0deg'})">▶</span>
+                Cards Already in Deck (${existingDeckCardIds.length})
+              </h3>
+              ${showExistingDeck ? `
+                <div class="deck-builder-grid">
+                  ${existingCards.map(card => `
+                    <div class="draft-card existing-card" style="opacity:0.7;pointer-events:none;border-color:var(--gold)">
+                      <img class="draft-card-img" src="./output-web/${card.id}.webp" alt="${card.name}"
+                           onerror="this.style.display='none'" loading="lazy" />
+                      <div class="draft-card-info">
+                        <div class="draft-card-name">${card.name}</div>
+                        <div class="draft-card-type">${card.type}</div>
+                        <div class="draft-card-stats">
+                          ${card.type === 'Unit' ? `⚔${card.atk} ❤${card.hp}` : ''}
+                          💎${card.manaCost}
+                        </div>
+                      </div>
+                      <div class="draft-check" style="background:var(--gold);color:#000">★</div>
+                    </div>
+                  `).join('')}
+                </div>
+              ` : ''}
+            </div>
+          `;
+        }
+
         this.container.innerHTML = `
           <div class="deck-builder">
             <div class="deck-builder-header">
@@ -82,6 +124,8 @@ export class DeckBuilderUI {
                 </div>
               ` : ''}
             </div>
+
+            ${existingDeckHTML}
 
             ${regionOrder.map(region => {
           const cards = regionGroups[region];
@@ -132,7 +176,7 @@ export class DeckBuilderUI {
         `;
 
         // Wire card clicks
-        this.container.querySelectorAll('.draft-card:not(.disabled)').forEach(el => {
+        this.container.querySelectorAll('.draft-card:not(.disabled):not(.existing-card)').forEach(el => {
           el.onclick = () => {
             const draftId = el.dataset.draftId;
             const cardRegion = el.dataset.region;
@@ -149,6 +193,15 @@ export class DeckBuilderUI {
             render();
           };
         });
+
+        // Wire existing deck toggle
+        const toggleBtn = this.container.querySelector('#toggle-existing-deck');
+        if (toggleBtn) {
+          toggleBtn.onclick = () => {
+            showExistingDeck = !showExistingDeck;
+            render();
+          };
+        }
 
         // Confirm button
         const btn = this.container.querySelector('#btn-confirm-draft');
