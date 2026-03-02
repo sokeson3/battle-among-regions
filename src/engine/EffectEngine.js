@@ -24,6 +24,7 @@ export const EFFECT_EVENTS = {
     ON_PHASE_CHANGE: 'ON_PHASE_CHANGE',
     ON_SPELL_PLAY: 'ON_SPELL_PLAY',
     ON_BATTLE_PHASE_START: 'ON_BATTLE_PHASE_START',
+    ON_POSITION_CHANGE: 'ON_POSITION_CHANGE',
 };
 
 /**
@@ -110,8 +111,10 @@ export class EffectEngine {
             }
 
             // Check set spells/traps (for reactive triggers)
+            // NOTE: Skip face-down Traps — they activate only via the response dialog, not automatically
             for (const card of player.getSetCards()) {
                 if (!card || card.faceUp) continue; // Only face-down cards
+                if (card.type === 'Trap') continue; // Traps activate through dialog only
                 const effects = this.getEffects(card.cardId);
                 for (const effect of effects) {
                     if (effect.trigger === event) {
@@ -164,11 +167,22 @@ export class EffectEngine {
      * @returns {{ cancelled: boolean }} result
      */
     async _resolveEffect(effect, context) {
+        // Track current source player for callback routing (AI vs human)
+        this._currentSourcePlayerId = context.sourcePlayer?.id ?? null;
+
+        // Track if we're resolving a spell/trap effect (for Scorched Earth gating)
+        const source = context.source;
+        const wasResolvingSpellOrTrap = this._resolvingSpellOrTrap;
+        if (source && (source.type === 'Spell' || source.type === 'Trap')) {
+            this._resolvingSpellOrTrap = true;
+        }
+
         if (effect.requiresTarget && this.onTargetRequired) {
             // Request target from UI
             const validTargets = effect.targets ? effect.targets(this.gameState, context) : [];
             if (validTargets.length === 0 && effect.requiresTarget) {
                 this.gameState.log('EFFECT', `${context.source?.name || 'Effect'}: No valid targets available.`);
+                this._resolvingSpellOrTrap = wasResolvingSpellOrTrap;
                 return { cancelled: true };
             }
 
@@ -177,6 +191,7 @@ export class EffectEngine {
                 context.target = target;
             } else {
                 // Player cancelled target selection
+                this._resolvingSpellOrTrap = wasResolvingSpellOrTrap;
                 return { cancelled: true };
             }
         }
@@ -186,6 +201,7 @@ export class EffectEngine {
         } catch (err) {
             console.error(`[EffectEngine] Error resolving effect ${effect.id}:`, err);
         }
+        this._resolvingSpellOrTrap = wasResolvingSpellOrTrap;
         return { cancelled: false };
     }
 
@@ -290,9 +306,27 @@ export class EffectEngine {
             this.gameState.log('EFFECT', `${target.name} is immune to damage!`);
             return 0;
         }
-        target.damageTaken += amount;
-        this.gameState.log('DAMAGE', `${target.name} takes ${amount} damage from ${source} (${target.damageTaken}/${target.currentDEF} damage taken)`);
-        this.gameState.emit('UNIT_DAMAGED', { target, amount, source });
+
+        // E035: Seal Spell — sealed player's units are immune
+        const targetOwner = this.gameState.getPlayerById(target.ownerId);
+        if (targetOwner && targetOwner._sealActive) {
+            this.gameState.log('EFFECT', `${target.name} is protected by Seal!`);
+            return 0;
+        }
+
+        // S038: Scorched Earth — +200 bonus damage ONLY from spells/traps
+        let bonus = 0;
+        if (this._resolvingSpellOrTrap) {
+            const scorchedOwner = this.gameState.players.find(p => p._scorchedEarthActive);
+            if (scorchedOwner && target.ownerId !== scorchedOwner.id) {
+                bonus = 200;
+            }
+        }
+        const totalDmg = amount + bonus;
+
+        target.damageTaken += totalDmg;
+        this.gameState.log('DAMAGE', `${target.name} takes ${totalDmg} damage from ${source}${bonus > 0 ? ' (+200 Scorched Earth)' : ''} (${target.damageTaken}/${target.currentDEF} damage taken)`);
+        this.gameState.emit('UNIT_DAMAGED', { target, amount: totalDmg, source });
 
         // Check if the unit should be destroyed (DEF reduced to 0)
         if (target.damageTaken >= target.currentDEF) {
@@ -300,7 +334,7 @@ export class EffectEngine {
             this.destroyUnit(target);
         }
 
-        return amount;
+        return totalDmg;
     }
 
     /**
@@ -309,9 +343,26 @@ export class EffectEngine {
     dealDamageToLP(playerId, amount, source = 'effect') {
         const player = this.gameState.getPlayerById(playerId);
         if (!player) return;
-        player.lp = Math.max(0, player.lp - amount);
-        this.gameState.log('LP_DAMAGE', `${player.name} takes ${amount} LP damage (${player.lp} LP remaining)`);
-        this.gameState.emit('LP_CHANGED', { playerId, amount: -amount, newLP: player.lp });
+
+        // E035: Seal Spell — sealed player is immune to LP damage
+        if (player._sealActive) {
+            this.gameState.log('EFFECT', `${player.name} is protected by Seal!`);
+            return;
+        }
+
+        // S038: Scorched Earth — +200 bonus damage ONLY from spells/traps
+        let bonus = 0;
+        if (this._resolvingSpellOrTrap) {
+            const scorchedOwner = this.gameState.players.find(p => p._scorchedEarthActive);
+            if (scorchedOwner && playerId !== scorchedOwner.id) {
+                bonus = 200;
+            }
+        }
+        const totalDmg = amount + bonus;
+
+        player.lp = Math.max(0, player.lp - totalDmg);
+        this.gameState.log('LP_DAMAGE', `${player.name} takes ${totalDmg} LP damage${bonus > 0 ? ' (+200 Scorched Earth)' : ''} (${player.lp} LP remaining)`);
+        this.gameState.emit('LP_CHANGED', { playerId, amount: -totalDmg, newLP: player.lp });
 
         if (player.lp <= 0) {
             player.isAlive = false;
@@ -327,9 +378,16 @@ export class EffectEngine {
     healLP(playerId, amount) {
         const player = this.gameState.getPlayerById(playerId);
         if (!player) return;
-        player.lp += amount;
-        this.gameState.log('HEAL', `${player.name} heals ${amount} LP (${player.lp} LP)`);
-        this.gameState.emit('LP_CHANGED', { playerId, amount, newLP: player.lp });
+        // Cap LP at starting LP (default 3000)
+        const maxLP = this.gameState.startingLP || 3000;
+        const actualHeal = Math.min(amount, maxLP - player.lp);
+        if (actualHeal <= 0) {
+            this.gameState.log('HEAL', `${player.name} is already at max LP (${player.lp}).`);
+            return;
+        }
+        player.lp += actualHeal;
+        this.gameState.log('HEAL', `${player.name} heals ${actualHeal} LP (${player.lp} LP)`);
+        this.gameState.emit('LP_CHANGED', { playerId, amount: actualHeal, newLP: player.lp });
     }
 
     /**
@@ -345,7 +403,7 @@ export class EffectEngine {
     /**
      * Destroy a unit and send to graveyard
      */
-    destroyUnit(cardInstance) {
+    async destroyUnit(cardInstance) {
         const location = this.gameState.findCardOnField(cardInstance.instanceId);
         if (!location) return;
 
@@ -359,15 +417,24 @@ export class EffectEngine {
 
         player.graveyard.push(cardInstance);
 
+        // Track for destruction-response prompts (W047, S048)
+        if (!this.gameState._recentlyDestroyed) this.gameState._recentlyDestroyed = [];
+        this.gameState._recentlyDestroyed.push({ card: cardInstance, ownerId: player.id });
+
         this.gameState.log('DESTROY', `${cardInstance.name} is destroyed and sent to the graveyard.`);
         this.gameState.emit('CARD_DESTROYED', { card: cardInstance, player, zone });
 
         // Trigger ON_SELF_DESTROY
-        this.trigger(EFFECT_EVENTS.ON_SELF_DESTROY, { destroyedCard: cardInstance, destroyedPlayer: player });
+        await this.trigger(EFFECT_EVENTS.ON_SELF_DESTROY, { destroyedCard: cardInstance, destroyedPlayer: player });
         // Trigger ON_FRIENDLY_DESTROY for other allies
-        this.trigger(EFFECT_EVENTS.ON_FRIENDLY_DESTROY, { destroyedCard: cardInstance, ownerId: player.id });
+        await this.trigger(EFFECT_EVENTS.ON_FRIENDLY_DESTROY, { destroyedCard: cardInstance, ownerId: player.id });
         // Trigger ON_DESTROY for any listener
-        this.trigger(EFFECT_EVENTS.ON_DESTROY, { destroyedCard: cardInstance, destroyedPlayer: player });
+        await this.trigger(EFFECT_EVENTS.ON_DESTROY, { destroyedCard: cardInstance, destroyedPlayer: player });
+
+        // Ask opponent if they want to respond to the destruction
+        if (this.controller) {
+            await this.controller._askOpponentResponse('destroy', { destroyedCard: cardInstance, destroyedPlayer: player });
+        }
     }
 
     /**

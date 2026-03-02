@@ -492,7 +492,7 @@ export function register(effectEngine, cardDB) {
         }),
     ]);
 
-    // W030: Shield Brother — If you control another unit with ≥600 DEF, +300 ATK
+    // W030: Shield Brother — If you control another unit with ≥600 DEF, +300 ATK (continuous)
     effectEngine.registerCardEffects('W030', [
         createEffect({
             cardId: 'W030',
@@ -503,6 +503,42 @@ export function register(effectEngine, cardDB) {
                     .some(u => u.instanceId !== ctx.source.instanceId && u.currentDEF >= 600);
                 if (hasTank) {
                     ee.applyPermStatMod(ctx.source, 300, 0, 'Shield Brother');
+                    ctx.source._shieldBrotherActive = true;
+                }
+            },
+        }),
+        // Recheck at turn start: remove or apply the buff as needed
+        createEffect({
+            cardId: 'W030',
+            trigger: EFFECT_EVENTS.ON_TURN_START,
+            description: 'Recheck Shield Brother condition',
+            condition: (gs, ctx) => ctx.activePlayer.id === ctx.source?.ownerId,
+            execute: (gs, ctx, ee) => {
+                const owner = gs.getPlayerById(ctx.source.ownerId);
+                const hasTank = owner.getFieldUnits()
+                    .some(u => u.instanceId !== ctx.source.instanceId && u.currentDEF >= 600);
+                if (hasTank && !ctx.source._shieldBrotherActive) {
+                    ee.applyPermStatMod(ctx.source, 300, 0, 'Shield Brother');
+                    ctx.source._shieldBrotherActive = true;
+                } else if (!hasTank && ctx.source._shieldBrotherActive) {
+                    ee.applyPermStatMod(ctx.source, -300, 0, 'Shield Brother lost');
+                    ctx.source._shieldBrotherActive = false;
+                }
+            },
+        }),
+        // Recheck when a friendly unit is destroyed
+        createEffect({
+            cardId: 'W030',
+            trigger: EFFECT_EVENTS.ON_FRIENDLY_DESTROY,
+            description: 'Recheck Shield Brother condition on friendly destroy',
+            condition: (gs, ctx) => ctx.ownerId === ctx.source?.ownerId && ctx.source?._shieldBrotherActive,
+            execute: (gs, ctx, ee) => {
+                const owner = gs.getPlayerById(ctx.source.ownerId);
+                const hasTank = owner.getFieldUnits()
+                    .some(u => u.instanceId !== ctx.source.instanceId && u.currentDEF >= 600);
+                if (!hasTank) {
+                    ee.applyPermStatMod(ctx.source, -300, 0, 'Shield Brother lost');
+                    ctx.source._shieldBrotherActive = false;
                 }
             },
         }),
@@ -595,7 +631,32 @@ export function register(effectEngine, cardDB) {
             trigger: 'SELF',
             description: 'Copy a unit\'s effect to a friendly unit',
             execute: async (gs, ctx, ee) => {
-                gs.log('EFFECT', 'Effect Mimicry activates!');
+                // Choose a friendly unit to receive the copied effect
+                const friendlies = ctx.sourcePlayer.getFieldUnits();
+                if (friendlies.length === 0) {
+                    gs.log('EFFECT', 'Effect Mimicry: No friendly units!');
+                    return;
+                }
+                const receiver = await ee.requestTarget(friendlies, 'Choose a friendly unit to receive the copied effect');
+                if (!receiver) return;
+
+                // Choose a target unit on the field to copy from
+                const allUnits = gs.getAllFieldUnits().filter(u => u.instanceId !== receiver.instanceId);
+                if (allUnits.length === 0) {
+                    gs.log('EFFECT', 'Effect Mimicry: No other units to copy from!');
+                    return;
+                }
+                const source = await ee.requestTarget(allUnits, 'Choose a unit to copy effects from');
+                if (!source) return;
+
+                // Copy the source's effects to execute on the receiver
+                const sourceEffects = ee.getEffects(source.cardId);
+                gs.log('EFFECT', `${receiver.name} copies ${source.name}'s printed effects until end of turn!`);
+                for (const eff of sourceEffects) {
+                    if (eff.trigger === EFFECT_EVENTS.ON_SUMMON || eff.trigger === 'ACTIVATED') {
+                        await ee._resolveEffect(eff, { ...ctx, source: receiver, sourcePlayer: ctx.sourcePlayer });
+                    }
+                }
             },
         }),
     ]);
@@ -780,13 +841,17 @@ export function register(effectEngine, cardDB) {
         }),
     ]);
 
-    // W045: Effect Dampener — Negate unit ability
+    // W045: Effect Dampener — CSV: "Negate unit ability". Implementation: silence summoned unit.
+    // Note: triggers on opponent summon since there is no dedicated ability-activation response prompt.
     effectEngine.registerCardEffects('W045', [
         createEffect({
             cardId: 'W045',
             trigger: EFFECT_EVENTS.ON_OPPONENT_SUMMON,
             description: "Negate opponent's unit ability",
-            condition: (gs, ctx) => ctx.summoningPlayer?.id !== ctx.sourcePlayer.id,
+            condition: (gs, ctx) => {
+                return ctx.summoningPlayer?.id !== ctx.sourcePlayer.id &&
+                    ctx.summonedCard?.effectTriggers?.length > 0;
+            },
             execute: (gs, ctx, ee) => {
                 if (ctx.summonedCard) {
                     ee.silenceUnit(ctx.summonedCard);
@@ -872,12 +937,13 @@ export function register(effectEngine, cardDB) {
         }),
     ]);
 
-    // W050: Power Siphon — When opponent activates ability: friendly gains ATK/DEF = cost x100
+    // W050: Power Siphon — CSV: "When opponent activates ability". Implementation: triggers on summon.
+    // Note: triggers on opponent summon since there is no dedicated ability-activation response prompt.
     effectEngine.registerCardEffects('W050', [
         createEffect({
             cardId: 'W050',
             trigger: EFFECT_EVENTS.ON_OPPONENT_SUMMON,
-            description: 'Friendly unit gains ATK/DEF equal to activating unit cost x100',
+            description: 'Friendly unit gains ATK/DEF equal to summoned unit cost x100',
             condition: (gs, ctx) => ctx.summoningPlayer?.id !== ctx.sourcePlayer.id,
             execute: async (gs, ctx, ee) => {
                 if (ctx.summonedCard) {

@@ -17,8 +17,10 @@ export class GameController {
         this.manaSystem = new ManaSystem(this.gameState);
         this.effectEngine = new EffectEngine(this.gameState);
         this.combatEngine = new CombatEngine(this.gameState, this.effectEngine);
-        this.turnManager = new TurnManager(this.gameState, this.manaSystem, this.effectEngine, this.combatEngine);
+        this.turnManager = new TurnManager(this.gameState, this.manaSystem, this.effectEngine, this.combatEngine, this);
         this.actionValidator = new ActionValidator(this.gameState, this.manaSystem);
+        this.actionValidator.effectEngine = this.effectEngine;
+        this.effectEngine.controller = this; // Allow EffectEngine to trigger response prompts
         this.onUIUpdate = null; // Callback to refresh UI
         this.onOpponentResponse = null; // Callback: (player, callback) => shows Yes/No prompt
     }
@@ -109,6 +111,10 @@ export class GameController {
         player.unitZone[slot] = card;
         player.unitsSummonedThisTurn++;
 
+        // Show the unit on the board before the announcement
+        this._notifyUI();
+        await new Promise(resolve => setTimeout(resolve, 500));
+
         this.gameState.log('SUMMON', `${player.name} summons ${card.name} in ${position} position (Slot ${slot + 1}).`);
         this.gameState.emit('UNIT_SUMMONED', { card, player, slot, position });
 
@@ -156,19 +162,41 @@ export class GameController {
         // Remove from hand
         player.hand = player.hand.filter(c => c.instanceId !== cardInstanceId);
 
+        // Place spell face-up on field (visible during resolution)
+        const spellSlot = player.getEmptySpellTrapSlot();
+        if (spellSlot >= 0) {
+            card.faceUp = true;
+            player.spellTrapZone[spellSlot] = card;
+        }
+
+        // Show the spell on the board before the announcement
+        this._notifyUI();
+        await new Promise(resolve => setTimeout(resolve, 500));
+
         this.gameState.log('SPELL', `${player.name} activates ${card.name}!`);
         this.gameState.emit('SPELL_ACTIVATED', { card, player });
 
         player.spellsPlayedThisTurn++;
 
-        // Check Scorched Earth (S038) — +200 damage for owner's spells/traps that deal damage
-        // This will be handled in the individual effect implementations
-
-        // Trigger spell effects
+        // Trigger spell effects (including E002 Scroll Library negate/copy)
         await this.effectEngine.trigger(EFFECT_EVENTS.ON_SPELL_ACTIVATE, {
             spell: card,
             caster: player,
         });
+
+        this._notifyUI(); // Show the spell on field
+
+        // Check if spell was negated (E002 Scroll Library)
+        if (this.gameState._scrollLibraryNegate) {
+            this.gameState._scrollLibraryNegate = false;
+            // Remove spell from field slot
+            if (spellSlot >= 0) player.spellTrapZone[spellSlot] = null;
+            // Send to graveyard without executing
+            player.graveyard.push(card);
+            this.gameState.log('SPELL', `${card.name} was negated!`);
+            this._notifyUI();
+            return { success: true, card, negated: true };
+        }
 
         // Execute the spell's own effect
         const effects = this.effectEngine.getEffects(card.cardId);
@@ -183,10 +211,20 @@ export class GameController {
             }
         }
 
+        // Keep spell visible on field for 2 seconds before removing
+        this._notifyUI();
+        await new Promise(resolve => setTimeout(resolve, 1200));
+
+        // Remove spell from field slot
+        if (spellSlot >= 0) {
+            player.spellTrapZone[spellSlot] = null;
+        }
+
         // If the player cancelled target selection, refund everything
         if (cancelled) {
             this.manaSystem.addMana(playerId, card.manaCost);
             player.hand.push(card);
+            card.faceUp = false;
             player.spellsPlayedThisTurn--;
             this.gameState.log('CANCEL', `${player.name} cancelled ${card.name}.`);
             this._notifyUI();
@@ -232,8 +270,15 @@ export class GameController {
         card.setThisTurn = true;
         player.spellTrapZone[slot] = card;
 
+        // Show the set card on the board before the announcement
+        this._notifyUI();
+        await new Promise(resolve => setTimeout(resolve, 500));
+
         this.gameState.log('SET', `${player.name} sets a card face-down.`);
         this.gameState.emit('CARD_SET', { card, player, slot });
+
+        // Ask players if they want to respond to the set
+        await this._askOpponentResponse('set', { setCard: card, settingPlayer: player });
 
         this._notifyUI();
         return { success: true, slot };
@@ -262,8 +307,15 @@ export class GameController {
         card.setThisTurn = true;
         player.spellTrapZone[slot] = card;
 
+        // Show the set card on the board before the announcement
+        this._notifyUI();
+        await new Promise(resolve => setTimeout(resolve, 500));
+
         this.gameState.log('SET', `${player.name} sets a Trap face-down.`);
         this.gameState.emit('CARD_SET', { card, player, slot });
+
+        // Ask players if they want to respond to the set
+        await this._askOpponentResponse('set', { setCard: card, settingPlayer: player });
 
         this._notifyUI();
         return { success: true, slot };
@@ -303,6 +355,10 @@ export class GameController {
         card.faceUp = true;
         targetPlayer.landmarkZone = card;
 
+        // Show the landmark on the board before the announcement
+        this._notifyUI();
+        await new Promise(resolve => setTimeout(resolve, 500));
+
         this.gameState.log('LANDMARK', `${player.name} places ${card.name} in ${targetPlayer.name}'s Landmark Zone.`);
         this.gameState.emit('LANDMARK_PLACED', { card, player, targetPlayer });
 
@@ -338,32 +394,65 @@ export class GameController {
             return { success: false, reason: 'Not enough mana.' };
         }
 
-        // Flip face-up
+        // Flip face-up (keep in slot so it's visible during resolution)
         card.faceUp = true;
 
-        // Remove from zone
-        player.spellTrapZone[slotIndex] = null;
+        // Show the spell face-up on the board before the announcement
+        this._notifyUI();
+        await new Promise(resolve => setTimeout(resolve, 500));
 
         this.gameState.log('SPELL', `${player.name} activates ${card.name} from the field!`);
         this.gameState.emit('SPELL_ACTIVATED', { card, player });
 
         player.spellsPlayedThisTurn++;
 
-        // Trigger spell effects
+        // Trigger spell effects (including E002 Scroll Library negate/copy)
         await this.effectEngine.trigger(EFFECT_EVENTS.ON_SPELL_ACTIVATE, {
             spell: card,
             caster: player,
         });
 
+        // Check if spell was negated (E002 Scroll Library)
+        if (this.gameState._scrollLibraryNegate) {
+            this.gameState._scrollLibraryNegate = false;
+            // Remove from zone and send to graveyard without executing
+            player.spellTrapZone[slotIndex] = null;
+            player.graveyard.push(card);
+            this.gameState.log('SPELL', `${card.name} was negated!`);
+            this._notifyUI();
+            return { success: true, card, negated: true };
+        }
+
         // Execute the spell's own effect
         const effects = this.effectEngine.getEffects(card.cardId);
+        let cancelled = false;
         for (const effect of effects) {
             if (effect.trigger === EFFECT_EVENTS.ON_SPELL_ACTIVATE || effect.trigger === 'SELF') {
-                await this.effectEngine._resolveEffect(effect, { source: card, sourcePlayer: player });
+                const result = await this.effectEngine._resolveEffect(effect, { source: card, sourcePlayer: player });
+                if (result && result.cancelled) {
+                    cancelled = true;
+                    break;
+                }
             }
         }
 
-        // Send to graveyard
+        // If the player cancelled target selection, refund everything
+        if (cancelled) {
+            this.manaSystem.addMana(playerId, card.manaCost);
+            card.faceUp = false;
+            player.spellTrapZone[slotIndex] = card;
+            player.spellsPlayedThisTurn--;
+            this.gameState.log('CANCEL', `${player.name} cancelled ${card.name}.`);
+            this._notifyUI();
+            return { success: false, reason: 'Spell cancelled.' };
+        }
+
+        // Keep spell visible on field for 2 seconds before sending to graveyard
+        this._notifyUI();
+        await new Promise(resolve => setTimeout(resolve, 1200));
+
+        // Remove from zone and send to graveyard
+        player.spellTrapZone[slotIndex] = null;
         player.graveyard.push(card);
 
         // Trigger ON_SPELL_PLAY for reactive effects
@@ -398,12 +487,36 @@ export class GameController {
         // Initialize battle state
         this.gameState.battleState = { attackNegated: false, battlePhaseEnded: false };
 
+        // Fire ON_FRIENDLY_TARGETED for traps like E039, E041, W046
+        if (targetInfo?.type === 'unit' && targetInfo.card) {
+            await this.effectEngine.trigger(EFFECT_EVENTS.ON_FRIENDLY_TARGETED, {
+                attacker,
+                attackerOwner: player,
+                target: targetInfo,
+            });
+        }
+
         // Ask players if they want to respond before battle resolves
         await this._askOpponentResponse('attack', { attacker, attackerOwner: player, target: targetInfo });
 
         // Resolve the attack (unless negated by response)
         if (!this.gameState.battleState.attackNegated) {
             await this.combatEngine.resolveAttack(attacker, targetInfo);
+
+            // After combat: prompt for destruction-triggered traps (W047, S048)
+            // Check if any unit was destroyed during combat
+            const destroyedUnits = this.gameState._recentlyDestroyed || [];
+            if (destroyedUnits.length > 0) {
+                for (const { card: destroyedCard, ownerId } of destroyedUnits) {
+                    await this._askOpponentResponse('destroy', {
+                        destroyedCard,
+                        ownerId,
+                        attacker,
+                        attackerOwner: player,
+                    });
+                }
+                this.gameState._recentlyDestroyed = [];
+            }
         }
 
         // Check if battle phase should end
@@ -428,6 +541,10 @@ export class GameController {
         if (!validation.valid) return { success: false, reason: validation.reason };
 
         card.activatedThisRound = true;
+
+        // Show the ability activation on the board before the announcement
+        this._notifyUI();
+        await new Promise(resolve => setTimeout(resolve, 500));
 
         this.gameState.log('ABILITY', `${player.name} activates ${card.name}'s ability.`);
         this.gameState.emit('ABILITY_ACTIVATED', { card, player });
@@ -463,6 +580,8 @@ export class GameController {
      */
     async exitBattlePhase() {
         await this.turnManager.endBattlePhase();
+        // Ask players if they want to respond to Main Phase 2 start
+        await this._askOpponentResponse('phase_change', { phase: 'MAIN2' });
         this._notifyUI();
     }
 
@@ -505,8 +624,16 @@ export class GameController {
 
         card.position = card.position === 'ATK' ? 'DEF' : 'ATK';
         card.hasChangedPositionThisTurn = true;
+
+        // Show the position change before the announcement
+        this._notifyUI();
+        await new Promise(resolve => setTimeout(resolve, 500));
+
         this.gameState.log('POSITION', `${card.name} switched to ${card.position} position.`);
         this.gameState.emit('POSITION_CHANGED', { card });
+
+        // Trigger position change effects (e.g., N001 Frostfell Citadel)
+        await this.effectEngine.trigger('ON_POSITION_CHANGE', { changedCard: card, player });
 
         this._notifyUI();
         return { success: true };
@@ -539,18 +666,22 @@ export class GameController {
         const activeId = gs.activePlayerIndex;
         const chainStack = [];
 
-        // Build initial player order: opponents first, then active player
+        // Both opponents AND the active player can respond (active player goes last in order)
         const playerOrder = [];
         for (const player of gs.players) {
             if (player.id !== activeId && player.isAlive) playerOrder.push(player);
         }
-        // Active player can also respond with their set cards
+        // Active player can also chain their set spells/traps in response
         const activePlayer = gs.getActivePlayer();
-        if (activePlayer && activePlayer.isAlive) playerOrder.push(activePlayer);
+        if (activePlayer.isAlive) playerOrder.push(activePlayer);
+        if (playerOrder.length === 0) return;
 
         let consecutivePasses = 0;
         let currentPlayerIdx = 0;
 
+        // ── Phase 1: Build the chain ──────────────────────────
+        // Collect all responses. Each activation flips face-up and pays costs,
+        // but effects are NOT executed yet.
         while (consecutivePasses < playerOrder.length) {
             const player = playerOrder[currentPlayerIdx % playerOrder.length];
 
@@ -570,16 +701,42 @@ export class GameController {
             if (response && response.activate && response.cardInstanceId) {
                 const card = faceDownCards.find(c => c.instanceId === response.cardInstanceId);
                 if (card) {
-                    // Add to chain stack for LIFO resolution
-                    chainStack.push({ playerId: player.id, cardInstanceId: response.cardInstanceId, card });
-                    consecutivePasses = 0; // Reset passes — other player can now respond
+                    const slotIndex = player.spellTrapZone.findIndex(c => c && c.instanceId === response.cardInstanceId);
 
-                    // Execute the card immediately (activation costs mana, flips face-up, triggers effect)
+                    // E019 Enigmatic Sensei — opponents must pay 400 LP for traps
                     if (card.type === 'Trap') {
-                        await this.activateTrap(player.id, response.cardInstanceId);
-                    } else {
-                        await this.activateSetSpell(player.id, response.cardInstanceId);
+                        const activePlayer = gs.getActivePlayer();
+                        if (player.id !== activePlayer.id) {
+                            for (const unit of activePlayer.getFieldUnits()) {
+                                if (unit.cardId === 'E019' && !unit.silenced) {
+                                    if (player.lp >= 400) {
+                                        player.lp -= 400;
+                                        gs.log('EFFECT', `${player.name} pays 400 LP to activate Trap (Enigmatic Sensei).`);
+                                    }
+                                    break;
+                                }
+                            }
+                        }
                     }
+
+                    // Spend mana
+                    if (!this.manaSystem.spendMana(player.id, card.manaCost, true)) {
+                        consecutivePasses++;
+                        currentPlayerIdx++;
+                        continue;
+                    }
+
+                    // Flip face-up (visible to all players during chain building)
+                    card.faceUp = true;
+                    this._notifyUI();
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                    const logType = card.type === 'Trap' ? 'TRAP' : 'SPELL';
+                    gs.log(logType, `${player.name} chains ${card.name}!`);
+                    gs.emit(card.type === 'Trap' ? 'TRAP_ACTIVATED' : 'SPELL_ACTIVATED', { card, player });
+                    this._notifyUI();
+
+                    chainStack.push({ playerId: player.id, cardInstanceId: response.cardInstanceId, card, slotIndex });
+                    consecutivePasses = 0; // Reset passes — other player can now respond
                 } else {
                     consecutivePasses++;
                 }
@@ -589,12 +746,63 @@ export class GameController {
 
             currentPlayerIdx++;
         }
+
+        // ── Phase 2: Resolve chain in LIFO order ─────────────
+        // Last activated card resolves first.
+        for (let i = chainStack.length - 1; i >= 0; i--) {
+            const entry = chainStack[i];
+            const player = gs.getPlayerById(entry.playerId);
+            const card = entry.card;
+            const slotIndex = entry.slotIndex;
+
+            gs.log('CHAIN', `Resolving chain link ${chainStack.length - i}: ${card.name}`);
+
+            const effects = this.effectEngine.getEffects(card.cardId);
+
+            if (card.type === 'Trap') {
+                // Execute all trap effects with trigger context
+                for (const effect of effects) {
+                    await this.effectEngine._resolveEffect(effect, {
+                        ...triggerContext, source: card, sourcePlayer: player,
+                    });
+                }
+            } else {
+                // Spell — resolve SELF and ON_SPELL_ACTIVATE effects
+                player.spellsPlayedThisTurn = (player.spellsPlayedThisTurn || 0) + 1;
+                for (const effect of effects) {
+                    if (effect.trigger === 'ON_SPELL_ACTIVATE' || effect.trigger === 'SELF') {
+                        await this.effectEngine._resolveEffect(effect, {
+                            source: card, sourcePlayer: player,
+                        });
+                    }
+                }
+            }
+
+            // Keep visible on field for 2 seconds
+            this._notifyUI();
+            await new Promise(resolve => setTimeout(resolve, 1200));
+
+            // Remove from field and send to graveyard
+            if (slotIndex >= 0 && player.spellTrapZone[slotIndex] === card) {
+                player.spellTrapZone[slotIndex] = null;
+            }
+            player.graveyard.push(card);
+
+            // Fire ON_SPELL_PLAY for spells (reactive effects like Pyromancer)
+            if (card.type === 'Spell') {
+                await this.effectEngine.trigger('ON_SPELL_PLAY', {
+                    spell: card, caster: player,
+                });
+            }
+
+            this._notifyUI();
+        }
     }
 
     /**
      * Activate a trap that was set face-down in the spell/trap zone
      */
-    async activateTrap(playerId, cardInstanceId) {
+    async activateTrap(playerId, cardInstanceId, triggerContext = {}) {
         const player = this.gameState.getPlayerById(playerId);
         const slotIndex = player.spellTrapZone.findIndex(c => c && c.instanceId === cardInstanceId);
         if (slotIndex === -1) return { success: false, reason: 'Card not found in Spell/Trap zone.' };
@@ -602,27 +810,46 @@ export class GameController {
         const card = player.spellTrapZone[slotIndex];
         if (card.type !== 'Trap') return { success: false, reason: 'Card is not a Trap.' };
 
+        // Check for E019 Enigmatic Sensei — opponents must pay 400 LP
+        const activePlayer = this.gameState.getActivePlayer();
+        if (playerId !== activePlayer.id) {
+            for (const unit of activePlayer.getFieldUnits()) {
+                if (unit.cardId === 'E019' && !unit.silenced) {
+                    if (player.lp >= 400) {
+                        player.lp -= 400;
+                        this.gameState.log('EFFECT', `${player.name} pays 400 LP to activate Trap (Enigmatic Sensei).`);
+                    }
+                    break;
+                }
+            }
+        }
+
         // Spend mana (spell mana allowed)
         if (!this.manaSystem.spendMana(playerId, card.manaCost, true)) {
             return { success: false, reason: 'Not enough mana.' };
         }
 
-        // Flip face-up
+        // Flip face-up (keep on field so the player can see it)
         card.faceUp = true;
 
-        // Remove from zone
-        player.spellTrapZone[slotIndex] = null;
+        // Show the trap face-up on the field before the announcement
+        this._notifyUI();
+        await new Promise(resolve => setTimeout(resolve, 500));
 
         this.gameState.log('TRAP', `${player.name} activates ${card.name}!`);
         this.gameState.emit('TRAP_ACTIVATED', { card, player });
 
-        // Execute the trap's own effect
+        // Execute the trap's own effect, merging trigger context so effects can access attacker/caster/etc.
         const effects = this.effectEngine.getEffects(card.cardId);
         for (const effect of effects) {
-            await this.effectEngine._resolveEffect(effect, { source: card, sourcePlayer: player });
+            await this.effectEngine._resolveEffect(effect, { ...triggerContext, source: card, sourcePlayer: player });
         }
 
-        // Send to graveyard
+        // Keep the trap visible on field for 2s (matches announcement text duration)
+        await new Promise(resolve => setTimeout(resolve, 1200));
+
+        // Now remove from zone and send to graveyard
+        player.spellTrapZone[slotIndex] = null;
         player.graveyard.push(card);
 
         this._notifyUI();

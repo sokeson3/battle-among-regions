@@ -15,6 +15,7 @@ export const WAR_ROUNDS_2P = [
         lp: 2000,
         vpWinner: 1,
         landmarkRewardWinner: 1,
+        minLandmarks: 1,
         description: 'Build a 20-card deck from your region, then draft from others.',
     },
     {

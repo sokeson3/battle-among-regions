@@ -11,18 +11,18 @@ export class ManaSystem {
     }
 
     /**
-     * Save up to 4 unspent primary mana into spell-mana pool.
+     * Save up to 3 unspent primary mana into spell-mana pool.
      * Called at the START of a turn, before gaining new mana.
      */
     saveSpellMana(playerId) {
         const player = this.gameState.getPlayerById(playerId);
         if (!player) return;
 
-        const toSave = Math.min(player.primaryMana, 4 - player.spellMana);
+        const toSave = Math.min(player.primaryMana, 3 - player.spellMana);
         if (toSave > 0) {
             player.spellMana += toSave;
             player.primaryMana -= toSave;
-            this.gameState.log('MANA_SAVE', `${player.name} saved ${toSave} mana to Spell-Mana pool (${player.spellMana}/4)`);
+            this.gameState.log('MANA_SAVE', `${player.name} saved ${toSave} mana to Spell-Mana pool (${player.spellMana}/3)`);
         }
     }
 

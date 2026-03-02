@@ -52,6 +52,7 @@ export class CampaignUI {
                 self.progress.currentStage = 1;
                 self.progress.completedStages = [];
                 self.progress.stats = {};
+                self.progress.savedDeckCardIds = [];
                 self.progress.save();
                 self.showCampaignMap();
             };
@@ -225,125 +226,151 @@ export class CampaignUI {
         const targetDeckSize = stage.draftDeckSize || 20;
         let draftIdCounter = 0;
 
-        if (stage.multiRegion) {
-            // ─── Multi-Region Finale Draft ─────────────────
-            // Determine which regions AI uses
-            const nonPlayerRegions = allRegions.filter(r => r !== playerRegion);
-            const aiRegions = nonPlayerRegions.slice(0, stage.opponentRegionCount);
-
-            // If AI uses all 4 regions, include player's region too
-            if (stage.opponentRegionCount >= 4) {
-                aiRegions.push(playerRegion);
-            }
-
-            // Build full pool from ALL regions
-            const fullPool = [];
-            for (const region of allRegions) {
-                const regionCards = cardDB.getCardsByRegion(region)
-                    .filter(c => c.type !== 'Token' && c.quantity > 0);
-                for (const card of regionCards) {
-                    for (let copy = 0; copy < card.quantity; copy++) {
-                        fullPool.push({ ...card, draftId: `${card.id}_draft_${draftIdCounter++}` });
-                    }
+        // ── Helper: Build a region's card pool ──
+        const buildRegionPool = (region) => {
+            const regionCards = cardDB.getCardsByRegion(region)
+                .filter(c => c.type !== 'Token' && c.quantity > 0);
+            const pool = [];
+            for (const card of regionCards) {
+                for (let copy = 0; copy < card.quantity; copy++) {
+                    pool.push({ ...card, draftId: `${card.id}_draft_${draftIdCounter++}` });
                 }
             }
+            return pool;
+        };
 
-            // AI drafts first from its regions
-            const aiPool = fullPool.filter(c => aiRegions.includes(c.region));
-            this._aiDraftedDeck = this._aiAutoDraft(aiPool, targetDeckSize);
+        // ── Determine AI region and seat arrangement ──
+        const aiRegion = stage.multiRegion
+            ? allRegions.filter(r => r !== playerRegion)[0]
+            : stage.opponentRegion;
 
-            // Build player pool: all regions, minus cards the AI took
-            const aiCardCounts = {};
-            for (const cardId of this._aiDraftedDeck) {
-                aiCardCounts[cardId] = (aiCardCounts[cardId] || 0) + 1;
-            }
-
-            // Remove AI-picked cards from pool
-            const playerPool = [];
-            const usedCounts = {};
-            for (const entry of fullPool) {
-                const aiCount = aiCardCounts[entry.id] || 0;
-                usedCounts[entry.id] = (usedCounts[entry.id] || 0) + 1;
-                if (usedCounts[entry.id] > aiCount) {
-                    // Only include landmarks from the player's own region
-                    if (entry.type === 'Landmark' && entry.region !== playerRegion) continue;
-                    playerPool.push(entry);
-                }
-            }
-
-            const savedDeckSize = this.progress.savedDeckCardIds.length;
-            const remainingPicks = Math.max(0, targetDeckSize - savedDeckSize);
-
-            const playerPicks = await this.deckBuilder.showDraftPick({
-                playerName: 'You',
-                playerRegion: playerRegion,
-                available: playerPool,
-                maxPicks: remainingPicks,
-                currentDeckSize: savedDeckSize,
-                targetDeckSize: targetDeckSize,
-                mustStartOwn: true,
-                existingDeckCardIds: this.progress.savedDeckCardIds,
-            });
-
-            this._playerDraftedDeck = [...this.progress.savedDeckCardIds, ...playerPicks];
-        } else {
-            // ─── Single-Region Draft (stages 1–12) ────────
-            // Pool is from ALL regions so the player can build from any region
-            // AI drafts independently, and its cards are excluded from player pool
-            let draftIdCounter2 = 0;
-            const fullPool = [];
-            for (const region of allRegions) {
-                const regionCards = cardDB.getCardsByRegion(region)
-                    .filter(c => c.type !== 'Token' && c.quantity > 0);
-                for (const card of regionCards) {
-                    for (let copy = 0; copy < card.quantity; copy++) {
-                        fullPool.push({ ...card, draftId: `${card.id}_draft_${draftIdCounter++}` });
-                    }
-                }
-            }
-
-            // AI auto-drafts from the opponent's region
-            const aiPool = fullPool.filter(c => c.region === stage.opponentRegion);
-            this._aiDraftedDeck = this._aiAutoDraft(
-                aiPool.map(p => ({ ...p })), targetDeckSize
-            );
-
-            // Build player pool: all regions, minus cards the AI took
-            const aiCardCounts = {};
-            for (const cardId of this._aiDraftedDeck) {
-                aiCardCounts[cardId] = (aiCardCounts[cardId] || 0) + 1;
-            }
-
-            // Remove AI-picked cards from pool
-            const playerPool = [];
-            const usedCounts = {};
-            for (const entry of fullPool) {
-                const aiCount = aiCardCounts[entry.id] || 0;
-                usedCounts[entry.id] = (usedCounts[entry.id] || 0) + 1;
-                if (usedCounts[entry.id] > aiCount) {
-                    // Only include landmarks from the player's own region
-                    if (entry.type === 'Landmark' && entry.region !== playerRegion) continue;
-                    playerPool.push(entry);
-                }
-            }
-
-            // Player gets the pool minus AI cards
-            const savedDeckSize = this.progress.savedDeckCardIds.length;
-            const remainingPicks = Math.max(0, targetDeckSize - savedDeckSize);
-
-            const playerPicks = await this.deckBuilder.showDraftPick({
-                playerName: 'You',
-                playerRegion: playerRegion,
-                available: playerPool,
-                maxPicks: remainingPicks,
-                currentDeckSize: savedDeckSize,
-                targetDeckSize: targetDeckSize,
-                mustStartOwn: false,
-                existingDeckCardIds: this.progress.savedDeckCardIds,
-            });
-
-            this._playerDraftedDeck = [...this.progress.savedDeckCardIds, ...playerPicks];
+        // Build initial region pools
+        const regionPools = {};
+        for (const region of allRegions) {
+            regionPools[region] = buildRegionPool(region);
         }
+
+        // Build 4 seats — one per unique region, player at 0, AI at 2
+        let seatRegions;
+        if (playerRegion === aiRegion) {
+            // Same region: player at 0, spread remaining 3 across seats 1–3
+            const others = allRegions.filter(r => r !== playerRegion)
+                .sort(() => Math.random() - 0.5);
+            seatRegions = [playerRegion, others[0], others[1], others[2]];
+        } else {
+            // Different regions: player at 0, AI at 2, fill 1 and 3
+            const others = allRegions.filter(r => r !== playerRegion && r !== aiRegion)
+                .sort(() => Math.random() - 0.5);
+            seatRegions = [playerRegion, others[0], aiRegion, others[1]];
+        }
+
+        const seats = seatRegions.map((region, i) => ({
+            ownerId: i === 0 ? 'player' : i === 2 ? 'ai' : null,
+            region: region,
+            pool: regionPools[region],
+        }));
+
+        // Track player picks and landmark counts
+        let playerPicks = [...this.progress.savedDeckCardIds];
+        let aiPicks = [];
+        let playerLandmarks = 0;
+
+        // Count existing landmarks in saved deck
+        for (const cardId of playerPicks) {
+            const card = cardDB.getCard(cardId);
+            if (card && card.type === 'Landmark') playerLandmarks++;
+        }
+
+        // ── Rotation: keep passing pools until both player and AI reach target ──
+        let pass = 0;
+        const maxPasses = 20; // safety cap
+
+        while (pass < maxPasses) {
+            // Check if both player and AI have enough cards
+            if (playerPicks.length >= targetDeckSize && aiPicks.length >= targetDeckSize) break;
+
+            // Check if any pools have cards left
+            const totalPoolCards = seats.reduce((sum, s) => sum + s.pool.length, 0);
+            if (totalPoolCards === 0) break;
+
+            // ── Player drafts from their current seat ──
+            const playerSeat = seats.find(s => s.ownerId === 'player');
+            if (playerSeat && playerPicks.length < targetDeckSize) {
+                // Filter pool: only show landmarks from player's own region
+                const filteredPool = playerSeat.pool.filter(c =>
+                    c.type !== 'Landmark' || c.region === playerRegion
+                );
+
+                if (filteredPool.length > 0) {
+                    const result = await this.deckBuilder.showRegionRotationDraft({
+                        playerName: 'You',
+                        playerRegion: playerRegion,
+                        regionPool: filteredPool,
+                        regionName: playerSeat.pool.length > 0 ? playerSeat.pool[0].region : 'Unknown',
+                        passNumber: pass + 1,
+                        totalPasses: '?',
+                        currentDeckSize: playerPicks.length,
+                        targetDeckSize: targetDeckSize,
+                        existingDeckCardIds: playerPicks,
+                        minLandmarks: 1,
+                        currentLandmarks: playerLandmarks,
+                    });
+
+                    // Record picks
+                    for (const cardId of result.picked) {
+                        playerPicks.push(cardId);
+                        const card = cardDB.getCard(cardId);
+                        if (card && card.type === 'Landmark') playerLandmarks++;
+                    }
+
+                    // Update seat pool
+                    const remainingDraftIds = new Set(result.remaining.map(c => c.draftId));
+                    const filteredDraftIds = new Set(filteredPool.map(c => c.draftId));
+                    playerSeat.pool = playerSeat.pool.filter(c =>
+                        remainingDraftIds.has(c.draftId) || !filteredDraftIds.has(c.draftId)
+                    );
+                }
+            }
+
+            // ── AI drafts from its current seat ──
+            const aiSeat = seats.find(s => s.ownerId === 'ai');
+            if (aiSeat && aiPicks.length < targetDeckSize) {
+                const aiPool = aiSeat.pool.filter(c =>
+                    c.type !== 'Landmark' || c.region === aiRegion
+                );
+                const aiNeeded = targetDeckSize - aiPicks.length;
+                const picked = this._aiAutoDraft(aiPool, Math.min(aiNeeded, aiPool.length));
+
+                for (const cardId of picked) {
+                    aiPicks.push(cardId);
+                }
+
+                // Remove picked cards from AI seat pool
+                const pickedCounts = {};
+                for (const id of picked) {
+                    pickedCounts[id] = (pickedCounts[id] || 0) + 1;
+                }
+                const removedCounts = {};
+                aiSeat.pool = aiSeat.pool.filter(c => {
+                    if (pickedCounts[c.id] && (!removedCounts[c.id] || removedCounts[c.id] < pickedCounts[c.id])) {
+                        removedCounts[c.id] = (removedCounts[c.id] || 0) + 1;
+                        return false;
+                    }
+                    return true;
+                });
+            }
+
+            // ── Pass pools: shift left ──
+            const pools = seats.map(s => s.pool);
+            for (let i = 0; i < seats.length; i++) {
+                seats[i].pool = pools[(i + 1) % seats.length];
+            }
+
+            pass++;
+        }
+
+        this._playerDraftedDeck = playerPicks;
+        this._aiDraftedDeck = aiPicks;
 
         // Start battle with drafted decks
         this._startCampaignBattle(stage);
@@ -439,13 +466,15 @@ export class CampaignUI {
     _wireAICallbacks() {
         const gs = this.controller.gameState;
 
-        // Override the controller's target/choice callbacks for AI player
-        const origOnTarget = this.controller.onTargetRequired;
-        const origOnChoice = this.controller.onChoiceRequired;
+        // Override the effect engine's target/choice callbacks for AI player
+        const origOnTarget = this.controller.effectEngine.onTargetRequired;
+        const origOnChoice = this.controller.effectEngine.onChoiceRequired;
         const origOnResponse = this.controller.onOpponentResponse;
 
-        this.controller.onTargetRequired = (targets, desc, cb) => {
-            if (gs.activePlayerIndex === 1 && this.ai) {
+        this.controller.effectEngine.onTargetRequired = (targets, desc, cb) => {
+            // Check which player's effect needs the target (not active player)
+            const sourcePlayerId = this.controller.effectEngine._currentSourcePlayerId;
+            if (sourcePlayerId === 1 && this.ai) {
                 // AI selects target automatically
                 const target = this.ai.chooseTarget(targets, desc);
                 setTimeout(() => cb(target), 100);
@@ -454,8 +483,9 @@ export class CampaignUI {
             }
         };
 
-        this.controller.onChoiceRequired = (options, desc, cb) => {
-            if (gs.activePlayerIndex === 1 && this.ai) {
+        this.controller.effectEngine.onChoiceRequired = (options, desc, cb) => {
+            const sourcePlayerId = this.controller.effectEngine._currentSourcePlayerId;
+            if (sourcePlayerId === 1 && this.ai) {
                 const choice = this.ai.chooseOption(options, desc);
                 setTimeout(() => cb(choice), 100);
             } else if (origOnChoice) {
@@ -464,18 +494,33 @@ export class CampaignUI {
         };
 
         // Override response callback: AI always auto-passes,
-        // and human auto-passes during AI's turn to prevent 'Not your turn' issues
+        // human gets the response dialog during AI's turn to activate traps
         this.controller.onOpponentResponse = (player, callback, chainContext) => {
             if (player.id === 1) {
                 // AI auto-passes on response prompts
-                setTimeout(() => callback({ activate: false }), 50);
-            } else if (gs.activePlayerIndex === 1) {
-                // Human player auto-passes during AI's turn
                 setTimeout(() => callback({ activate: false }), 50);
             } else if (origOnResponse) {
                 origOnResponse(player, callback, chainContext);
             } else {
                 callback({ activate: false });
+            }
+        };
+
+        // Wire AI action callback for visual feedback
+        this.ai.onAction = async (actionType, data) => {
+            if (actionType === 'attack') {
+                const targetUnit = data.target?.type === 'unit' ? data.target.card : null;
+                const targetPlayer = data.target?.type === 'direct' ? data.target.player : null;
+                this.gameUI._showAttackAnimation(data.attacker, targetUnit, targetPlayer);
+                await new Promise(r => setTimeout(r, 1200));
+            } else if (actionType === 'summon') {
+                await new Promise(r => setTimeout(r, 1500));
+            } else if (actionType === 'spell') {
+                await new Promise(r => setTimeout(r, 1500));
+            } else if (actionType === 'setTrap') {
+                await new Promise(r => setTimeout(r, 800));
+            } else if (actionType === 'landmark') {
+                await new Promise(r => setTimeout(r, 1500));
             }
         };
     }

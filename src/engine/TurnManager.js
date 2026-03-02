@@ -12,11 +12,12 @@ export class TurnManager {
      * @param {import('./EffectEngine.js').EffectEngine} effectEngine
      * @param {import('./CombatEngine.js').CombatEngine} combatEngine
      */
-    constructor(gameState, manaSystem, effectEngine, combatEngine) {
+    constructor(gameState, manaSystem, effectEngine, combatEngine, controller = null) {
         this.gameState = gameState;
         this.manaSystem = manaSystem;
         this.effectEngine = effectEngine;
         this.combatEngine = combatEngine;
+        this.controller = controller;
     }
 
     // ─── Game Start ───────────────────────────────────────────
@@ -140,9 +141,14 @@ export class TurnManager {
         activePlayer.unitsSummonedThisTurn = 0;
         activePlayer.spellsPlayedThisTurn = 0;
 
-        // Clear setThisTurn for all face-down cards (they were set last turn)
-        for (const card of activePlayer.spellTrapZone) {
-            if (card) card.setThisTurn = false;
+        // Reset Battle Phase re-entry prevention
+        gs.hasBattledThisTurn = false;
+
+        // Clear setThisTurn for ALL players' face-down cards (traps become active next turn)
+        for (const p of gs.players) {
+            for (const card of p.spellTrapZone) {
+                if (card) card.setThisTurn = false;
+            }
         }
 
         // Reset "once per round" flags for all units when round changes
@@ -150,6 +156,10 @@ export class TurnManager {
             for (const player of gs.players) {
                 for (const unit of player.getFieldUnits()) {
                     unit.activatedThisRound = false;
+                }
+                // Reset landmark once-per-round flags (E002 Scroll Library)
+                if (player.landmarkZone) {
+                    player.landmarkZone._scrollLibraryUsed = false;
                 }
             }
         }
@@ -176,12 +186,22 @@ export class TurnManager {
         // 2. Set primary mana for the turn
         this.manaSystem.gainMana(player.id);
 
-        // 3. Trigger turn start effects
+        // 3. S013: Reckless Berserker — loses 200 DEF at start of the player's turn
+        for (const unit of player.getFieldUnits()) {
+            if (unit.cardId === 'S013' && !unit.silenced) {
+                this.effectEngine.applyPermStatMod(unit, 0, -200, 'Reckless Berserker decay');
+                if (unit.currentDEF - unit.damageTaken <= 0) {
+                    await this.effectEngine.destroyUnit(unit);
+                }
+            }
+        }
+
+        // 4. Trigger turn start effects
         await this.effectEngine.trigger(EFFECT_EVENTS.ON_TURN_START, {
             activePlayer: player,
         });
 
-        // 4. Draw 1 card (skip on very first turn)
+        // 5. Draw 1 card (skip on very first turn)
         if (!skipDraw) {
             this.effectEngine.drawCards(player.id, 1);
         }
@@ -200,6 +220,11 @@ export class TurnManager {
         gs.phase = PHASES.MAIN1;
         gs.log('PHASE', `Main Phase 1`);
         gs.emit('PHASE_CHANGED', { phase: PHASES.MAIN1 });
+
+        // Ask opponent if they want to respond to Main Phase 1 start
+        if (this.controller) {
+            await this.controller._askOpponentResponse('phase_change', { phase: 'MAIN1' });
+        }
         // Player actions are handled via the GameController
     }
 
@@ -216,7 +241,14 @@ export class TurnManager {
             return false;
         }
 
+        // Can only enter Battle Phase once per turn
+        if (gs.hasBattledThisTurn) {
+            gs.log('PHASE', 'Already entered Battle Phase this turn.');
+            return false;
+        }
+
         gs.phase = PHASES.BATTLE;
+        gs.hasBattledThisTurn = true;
         gs.log('PHASE', 'Battle Phase');
         gs.emit('PHASE_CHANGED', { phase: PHASES.BATTLE });
 
@@ -280,7 +312,7 @@ export class TurnManager {
                 // Check for destroyed units
                 await this._checkDestroyedUnits();
             }
-            // N025: Aurora Sentinel — +100 DEF to adjacent unit
+            // N025: Aurora Sentinel — +100 DEF to an adjacent unit (player chooses)
             if (unit.cardId === 'N025') {
                 const slotIdx = player.unitZone.indexOf(unit);
                 if (slotIdx >= 0) {
@@ -288,8 +320,18 @@ export class TurnManager {
                         .filter(i => i >= 0 && i < 5 && player.unitZone[i] && player.unitZone[i].instanceId !== unit.instanceId)
                         .map(i => player.unitZone[i]);
                     if (adjacent.length > 0) {
-                        // Apply to the first adjacent unit (cannot target itself)
-                        this.effectEngine.applyPermStatMod(adjacent[0], 0, 100, 'Aurora Sentinel');
+                        let chosen;
+                        if (adjacent.length === 1) {
+                            chosen = adjacent[0];
+                        } else {
+                            chosen = await this.effectEngine.requestTarget(
+                                adjacent,
+                                'Aurora Sentinel: Choose an adjacent friendly unit to grant +100 DEF'
+                            );
+                        }
+                        if (chosen) {
+                            this.effectEngine.applyPermStatMod(chosen, 0, 100, 'Aurora Sentinel');
+                        }
                     }
                 }
             }
@@ -303,13 +345,32 @@ export class TurnManager {
             }
         }
 
-        // S013: Reckless Berserker — loses 200 DEF at turn start (handled here for simplicity)
-        for (const unit of player.getFieldUnits()) {
-            if (unit.cardId === 'S013' && !unit.silenced) {
-                this.effectEngine.applyPermStatMod(unit, 0, -200, 'Reckless Berserker decay');
-                if (unit.currentDEF - unit.damageTaken <= 0) {
-                    await this.effectEngine.destroyUnit(unit);
+        // S021: Warlord of the Scorch — clear temporary Pierce from units
+        for (const p of gs.players) {
+            for (const unit of p.getFieldUnits()) {
+                if (unit._tempPierce) {
+                    unit.keywords = unit.keywords.filter(k => k !== 'PIERCE');
+                    unit._tempPierce = false;
                 }
+            }
+        }
+
+        // N022: Ymir's Bulwark — clear round-duration buffs when the round advances
+        for (const p of gs.players) {
+            for (const unit of p.getFieldUnits()) {
+                if (unit._ymirRoundBuff && gs.roundCounter > unit._ymirRoundBuff.round) {
+                    this.effectEngine.applyPermStatMod(unit, -unit._ymirRoundBuff.atk, -unit._ymirRoundBuff.def, "Ymir's Bulwark expired");
+                    delete unit._ymirRoundBuff;
+                }
+            }
+        }
+
+        // E035: Seal Spell — clear seal immunity when the round expires
+        for (const p of gs.players) {
+            if (p._sealActive && gs.roundCounter >= p._sealExpiresRound) {
+                p._sealActive = false;
+                delete p._sealExpiresRound;
+                gs.log('EFFECT', `${p.name}'s Seal protection has expired.`);
             }
         }
 

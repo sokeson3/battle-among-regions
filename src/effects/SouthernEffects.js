@@ -12,17 +12,41 @@ export function register(effectEngine, cardDB) {
     // S002: Volcanic Forge — Southern +200 ATK (handled in CombatEngine._applyDefenderLandmark)
 
     // S038: Scorched Earth — +200 dmg for spells/traps that deal damage
+    // Sets a flag BEFORE spell execution (ON_SPELL_ACTIVATE) so bonus damage is applied
+    // during the spell's dealDamageToUnit/dealDamageToLP calls.
     effectEngine.registerCardEffects('S038', [
         createEffect({
             cardId: 'S038',
-            trigger: EFFECT_EVENTS.ON_SPELL_PLAY,
+            trigger: EFFECT_EVENTS.ON_SPELL_ACTIVATE,
             description: 'Spells/traps deal +200 damage',
+            priority: 1, // Execute before the spell resolves
             condition: (gs, ctx) => {
                 const owner = gs.players.find(p => p.landmarkZone?.cardId === 'S038');
                 return owner && ctx.caster?.id === owner.id;
             },
             execute: (gs, ctx, ee) => {
-                gs.log('LANDMARK', 'Scorched Earth: Spell/Trap deals +200 damage!');
+                const owner = gs.players.find(p => p.landmarkZone?.cardId === 'S038');
+                if (owner) {
+                    owner._scorchedEarthActive = true;
+                    gs.log('LANDMARK', 'Scorched Earth: Spell/Trap deals +200 damage!');
+                }
+            },
+        }),
+        // Clear the flag after the spell resolves (ON_SPELL_PLAY fires after execution)
+        createEffect({
+            cardId: 'S038',
+            trigger: EFFECT_EVENTS.ON_SPELL_PLAY,
+            description: 'Clear Scorched Earth bonus',
+            priority: 10, // Execute after other ON_SPELL_PLAY effects
+            condition: (gs, ctx) => {
+                const owner = gs.players.find(p => p.landmarkZone?.cardId === 'S038');
+                return owner && owner._scorchedEarthActive;
+            },
+            execute: (gs, ctx, ee) => {
+                const owner = gs.players.find(p => p.landmarkZone?.cardId === 'S038');
+                if (owner) {
+                    owner._scorchedEarthActive = false;
+                }
             },
         }),
     ]);
@@ -146,7 +170,8 @@ export function register(effectEngine, cardDB) {
                 for (const unit of ctx.sourcePlayer.getFieldUnits()) {
                     if (unit.region === 'Southern' && !unit.keywords.includes('PIERCE')) {
                         unit.keywords.push('PIERCE');
-                        gs.log('EFFECT', `${unit.name} gains Pierce!`);
+                        unit._tempPierce = true;
+                        gs.log('EFFECT', `${unit.name} gains Pierce this turn!`);
                     }
                 }
             },
@@ -320,7 +345,6 @@ export function register(effectEngine, cardDB) {
             execute: (gs, ctx, ee) => {
                 if (ctx.target) {
                     ee.dealDamageToUnit(ctx.target, 100, 'Quick Strike');
-                    if (ctx.target.damageTaken >= ctx.target.currentDEF) ee.destroyUnit(ctx.target);
                 }
             },
         }),
@@ -358,7 +382,6 @@ export function register(effectEngine, cardDB) {
                     ee.dealDamageToLP(ctx.target.player.id, 300, 'Searing Bolt');
                 } else if (ctx.target) {
                     ee.dealDamageToUnit(ctx.target, 300, 'Searing Bolt');
-                    if (ctx.target.damageTaken >= ctx.target.currentDEF) ee.destroyUnit(ctx.target);
                 }
             },
         }),
@@ -371,8 +394,39 @@ export function register(effectEngine, cardDB) {
             trigger: 'SELF',
             description: 'Force a battle between two units',
             execute: async (gs, ctx, ee) => {
-                gs.log('EFFECT', 'Challenge forces a duel!');
-                // This would need to invoke combat engine inline
+                // Choose a friendly unit in ATK position
+                const friendlyATK = ctx.sourcePlayer.getFieldUnits().filter(u => u.position === 'ATK');
+                if (friendlyATK.length === 0) {
+                    gs.log('EFFECT', 'Challenge: No friendly units in ATK position!');
+                    return;
+                }
+                const friendlyChoice = await ee.requestTarget(friendlyATK, 'Choose your unit in ATK position');
+                if (!friendlyChoice) return;
+
+                // Choose an enemy unit
+                const enemies = gs.getOpponents(ctx.sourcePlayer.id).flatMap(o => o.getFieldUnits());
+                if (enemies.length === 0) {
+                    gs.log('EFFECT', 'Challenge: No enemy units to fight!');
+                    return;
+                }
+                const enemyChoice = await ee.requestTarget(enemies, 'Choose an enemy unit to fight');
+                if (!enemyChoice) return;
+
+                const attacker = friendlyChoice;
+                const defender = enemyChoice;
+                const attackerOwner = ctx.sourcePlayer;
+                const defenderOwner = gs.getPlayerById(defender.ownerId);
+
+                gs.log('EFFECT', `Challenge! ${attacker.name} fights ${defender.name}!`);
+
+                // Resolve combat inline (ATK vs ATK style — both deal damage)
+                const atkDmg = Math.max(0, attacker.currentATK);
+                const defDmg = Math.max(0, defender.currentATK);
+
+                ee.dealDamageToUnit(defender, atkDmg, `Challenge (${attacker.name})`);
+                ee.dealDamageToUnit(attacker, defDmg, `Challenge (${defender.name})`);
+
+                gs.log('EFFECT', `Challenge resolved: ${attacker.name} ${attacker.damageTaken}/${attacker.currentDEF} | ${defender.name} ${defender.damageTaken}/${defender.currentDEF}`);
             },
         }),
     ]);
@@ -388,7 +442,6 @@ export function register(effectEngine, cardDB) {
             execute: (gs, ctx, ee) => {
                 if (ctx.target) {
                     ee.dealDamageToUnit(ctx.target, 400, 'Finishing Blow');
-                    if (ctx.target.damageTaken >= ctx.target.currentDEF) ee.destroyUnit(ctx.target);
                 }
             },
         }),
@@ -420,7 +473,6 @@ export function register(effectEngine, cardDB) {
                     const target = await ee.requestTarget(allUnits.filter(u => u.damageTaken < u.currentDEF), `Target ${i + 1} for 200 damage`);
                     if (target) {
                         ee.dealDamageToUnit(target, 200, 'Molten Rain');
-                        if (target.damageTaken >= target.currentDEF) ee.destroyUnit(target);
                     }
                 }
             },
@@ -466,7 +518,6 @@ export function register(effectEngine, cardDB) {
             execute: (gs, ctx, ee) => {
                 if (ctx.target) {
                     ee.dealDamageToUnit(ctx.target, 600, 'Unstable Blast');
-                    if (ctx.target.damageTaken >= ctx.target.currentDEF) ee.destroyUnit(ctx.target);
                 }
             },
         }),

@@ -27,6 +27,22 @@ export function register(effectEngine, cardDB) {
                 }
             },
         }),
+        createEffect({
+            cardId: 'N001',
+            trigger: EFFECT_EVENTS.ON_POSITION_CHANGE,
+            description: 'Unit switched to DEF gains +200 DEF',
+            condition: (gs, ctx) => {
+                const owner = gs.getPlayerById(ctx.changedCard?.ownerId);
+                return owner?.landmarkZone?.cardId === 'N001' &&
+                    !owner.landmarkZone.silenced &&
+                    ctx.changedCard?.position === 'DEF' &&
+                    !ctx.changedCard._n001Applied;
+            },
+            execute: (gs, ctx, ee) => {
+                ee.applyPermStatMod(ctx.changedCard, 0, 200, 'Frostfell Citadel');
+                ctx.changedCard._n001Applied = true;
+            },
+        }),
     ]);
     // N002: Ancestral Ice Cairn — +1 extra mana
     // Handled inline in ManaSystem._getExtraMana()
@@ -196,7 +212,7 @@ export function register(effectEngine, cardDB) {
         createEffect({
             cardId: 'N022',
             trigger: EFFECT_EVENTS.ON_SUMMON,
-            description: 'All other friendly units +200 ATK or +200 DEF; heal 200 LP',
+            description: 'All other friendly units +200 ATK or +200 DEF this round; heal 200 LP',
             isOptional: false,
             execute: async (gs, ctx, ee) => {
                 const choice = await ee.requestChoice(
@@ -208,9 +224,12 @@ export function register(effectEngine, cardDB) {
                 for (const unit of friendlyUnits) {
                     if (unit.instanceId !== ctx.source.instanceId) {
                         if (choice?.value === 'atk') {
-                            ee.applyTempStatMod(unit, 200, 0, "Ymir's Bulwark");
+                            // "this round" = lasts until the same player's next End Phase
+                            ee.applyPermStatMod(unit, 200, 0, "Ymir's Bulwark");
+                            unit._ymirRoundBuff = { atk: 200, def: 0, round: gs.roundCounter };
                         } else {
-                            ee.applyTempStatMod(unit, 0, 200, "Ymir's Bulwark");
+                            ee.applyPermStatMod(unit, 0, 200, "Ymir's Bulwark");
+                            unit._ymirRoundBuff = { atk: 0, def: 200, round: gs.roundCounter };
                         }
                     }
                 }
@@ -219,20 +238,22 @@ export function register(effectEngine, cardDB) {
         }),
     ]);
 
-    // N023: The Great White Bear — Pierce (keyword). On destroy enemy unit: heal 200. If 10 mana: +200 ATK
+    // N023: The Great White Bear — Pierce (keyword). On destroy enemy unit: heal 200. If 10 mana: +200 ATK (once)
     effectEngine.registerCardEffects('N023', [
         createEffect({
             cardId: 'N023',
             trigger: EFFECT_EVENTS.ON_TURN_START,
-            description: 'If you have 10 total mana, gain +200 ATK',
+            description: 'If you have 10 total mana, gain +200 ATK (once)',
             condition: (gs, ctx) => {
                 return ctx.activePlayer.id === ctx.source?.ownerId &&
-                    ctx.activePlayer.getTotalMana() >= 10;
+                    ctx.activePlayer.getTotalMana() >= 10 &&
+                    !ctx.source._n023BonusApplied;
             },
             execute: (gs, ctx, ee) => {
                 const bear = ctx.source;
                 if (bear) {
                     ee.applyPermStatMod(bear, 200, 0, 'The Great White Bear (10 mana bonus)');
+                    bear._n023BonusApplied = true;
                 }
             },
         }),
@@ -439,7 +460,6 @@ export function register(effectEngine, cardDB) {
             execute: (gs, ctx, ee) => {
                 if (ctx.target) {
                     ee.dealDamageToUnit(ctx.target, 400, 'Sudden Thaw');
-                    if (ctx.target.damageTaken >= ctx.target.currentDEF) ee.destroyUnit(ctx.target);
                 }
             },
         }),
@@ -649,13 +669,13 @@ export function register(effectEngine, cardDB) {
     effectEngine.registerCardEffects('N047', [
         createEffect({
             cardId: 'N047',
-            trigger: EFFECT_EVENTS.ON_DAMAGE_TO_LP,
+            trigger: EFFECT_EVENTS.ON_ATTACK_DECLARE,
             description: 'Reduce combat LP damage by 500',
-            condition: (gs, ctx) => ctx.isCombat && ctx.defender?.id === ctx.sourcePlayer.id,
+            condition: (gs, ctx) => ctx.attackerOwner?.id !== ctx.sourcePlayer.id,
             execute: (gs, ctx, ee) => {
-                const reduction = Math.min(500, ctx.damage || 0);
-                ee.healLP(ctx.sourcePlayer.id, reduction);
-                gs.log('TRAP', `Hibernation Ward reduces damage by ${reduction}!`);
+                // Set a flag so the combat engine reduces LP damage by 500
+                ctx.sourcePlayer._hibernationWardActive = true;
+                gs.log('TRAP', 'Hibernation Ward activated — next combat LP damage reduced by 500!');
             },
         }),
     ]);

@@ -282,6 +282,7 @@ export class CampaignProgress {
         this.currentStage = 1;
         this.completedStages = [];
         this.stats = {};
+        this.savedDeckCardIds = [];
         this.save();
     }
 

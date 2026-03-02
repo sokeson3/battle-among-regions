@@ -6449,3 +6449,830 @@ body {
     stroke-dashoffset: -24;
   }
 }
+
+/* ═══════════════════════════════════════════════════════════════
+   Enhanced Visual Effects — Game Feel Improvements
+   ═══════════════════════════════════════════════════════════════ */
+
+/* ─── P1-1: Screen Shake on Damage ──────────────────── */
+
+@keyframes screen-shake {
+
+  0%,
+  100% {
+    transform: translate(0, 0);
+  }
+
+  10% {
+    transform: translate(-6px, 2px);
+  }
+
+  20% {
+    transform: translate(4px, -4px);
+  }
+
+  30% {
+    transform: translate(-3px, 3px);
+  }
+
+  40% {
+    transform: translate(5px, -1px);
+  }
+
+  50% {
+    transform: translate(-4px, -3px);
+  }
+
+  60% {
+    transform: translate(3px, 4px);
+  }
+
+  70% {
+    transform: translate(-2px, -2px);
+  }
+
+  80% {
+    transform: translate(2px, 1px);
+  }
+
+  90% {
+    transform: translate(-1px, -1px);
+  }
+}
+
+#app.screen-shake {
+  animation: screen-shake 0.35s ease-out;
+}
+
+/* ─── P1-2: Card Flip (Face-Down → Face-Up) ─────────── */
+
+.game-card.card-flipping {
+  perspective: 800px;
+  animation: card-flip 0.6s ease-in-out;
+}
+
+@keyframes card-flip {
+  0% {
+    transform: rotateY(180deg) scale(0.9);
+    filter: brightness(0.5);
+  }
+
+  40% {
+    transform: rotateY(90deg) scale(1.15);
+    filter: brightness(1.8);
+  }
+
+  60% {
+    transform: rotateY(40deg) scale(1.1);
+    filter: brightness(1.2);
+  }
+
+  100% {
+    transform: rotateY(0deg) scale(1);
+    filter: brightness(1);
+  }
+}
+
+/* ─── P1-3: Spell Activation Flash ──────────────────── */
+
+.game-card.spell-activating {
+  animation: spell-flash 0.5s ease-out;
+}
+
+@keyframes spell-flash {
+  0% {
+    filter: brightness(1);
+    box-shadow: 0 0 0px transparent;
+  }
+
+  20% {
+    filter: brightness(2.5);
+    box-shadow: 0 0 40px rgba(255, 213, 79, 0.8), 0 0 80px rgba(255, 213, 79, 0.4);
+  }
+
+  50% {
+    filter: brightness(1.5);
+    box-shadow: 0 0 25px rgba(255, 213, 79, 0.5), 0 0 50px rgba(255, 213, 79, 0.2);
+  }
+
+  100% {
+    filter: brightness(1);
+    box-shadow: none;
+  }
+}
+
+/* ─── P1-4: Position Switch (ATK↔DEF) ───────────────── */
+
+.game-card.switching-to-def {
+  animation: switch-to-def 0.35s ease-in-out;
+}
+
+.game-card.switching-to-atk {
+  animation: switch-to-atk 0.35s ease-in-out;
+}
+
+@keyframes switch-to-def {
+  0% {
+    transform: rotate(0deg) scale(1);
+  }
+
+  40% {
+    transform: rotate(45deg) scale(1.05);
+  }
+
+  100% {
+    transform: rotate(90deg) scale(1);
+  }
+}
+
+@keyframes switch-to-atk {
+  0% {
+    transform: rotate(90deg) scale(1);
+  }
+
+  40% {
+    transform: rotate(45deg) scale(1.05);
+  }
+
+  100% {
+    transform: rotate(0deg) scale(1);
+  }
+}
+
+/* ─── P1-5: Enhanced Floating Numbers ───────────────── */
+
+.floating-number {
+  font-size: 1.8rem !important;
+  animation: float-up-enhanced 1.4s ease-out forwards !important;
+}
+
+@keyframes float-up-enhanced {
+  0% {
+    opacity: 1;
+    transform: translateY(0) scale(0.3);
+  }
+
+  15% {
+    opacity: 1;
+    transform: translateY(-8px) scale(1.5);
+  }
+
+  30% {
+    transform: translateY(-18px) scale(1);
+  }
+
+  100% {
+    opacity: 0;
+    transform: translateY(-70px) scale(0.8);
+  }
+}
+
+.floating-number.damage {
+  text-shadow: 0 0 12px rgba(255, 23, 68, 0.8), 0 2px 4px rgba(0, 0, 0, 0.5) !important;
+}
+
+.floating-number.heal {
+  text-shadow: 0 0 12px rgba(105, 240, 174, 0.8), 0 2px 4px rgba(0, 0, 0, 0.5) !important;
+}
+
+.floating-number.mana {
+  text-shadow: 0 0 12px rgba(79, 195, 247, 0.8), 0 2px 4px rgba(0, 0, 0, 0.5) !important;
+}
+
+/* ─── P2-6: Destruction Particles ───────────────────── */
+
+.destruction-particle {
+  position: absolute;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  pointer-events: none;
+  z-index: 70;
+  animation: particle-fly 0.8s ease-out forwards;
+}
+
+.destruction-particle.fire {
+  background: #ff4444;
+  box-shadow: 0 0 6px #ff4444;
+}
+
+.destruction-particle.gold {
+  background: #ffd54f;
+  box-shadow: 0 0 6px #ffd54f;
+}
+
+.destruction-particle.white {
+  background: #ffffff;
+  box-shadow: 0 0 6px #ffffff;
+}
+
+@keyframes particle-fly {
+  0% {
+    opacity: 1;
+    transform: translate(0, 0) scale(1);
+  }
+
+  60% {
+    opacity: 0.8;
+  }
+
+  100% {
+    opacity: 0;
+    transform: translate(var(--px), var(--py)) scale(0);
+  }
+}
+
+/* ─── P2-7: Turn Start Banner ───────────────────────── */
+
+.turn-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+  pointer-events: none;
+  background: rgba(0, 0, 0, 0.55);
+  animation: banner-bg 1.6s ease-out forwards;
+}
+
+@keyframes banner-bg {
+  0% {
+    opacity: 0;
+  }
+
+  15% {
+    opacity: 1;
+  }
+
+  70% {
+    opacity: 1;
+  }
+
+  100% {
+    opacity: 0;
+  }
+}
+
+.turn-banner-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  animation: banner-slide 1.6s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes banner-slide {
+  0% {
+    transform: translateX(-120px) scale(0.8);
+    opacity: 0;
+  }
+
+  20% {
+    transform: translateX(0) scale(1.05);
+    opacity: 1;
+  }
+
+  35% {
+    transform: translateX(0) scale(1);
+    opacity: 1;
+  }
+
+  75% {
+    transform: translateX(0) scale(1);
+    opacity: 1;
+  }
+
+  100% {
+    transform: translateX(120px) scale(0.8);
+    opacity: 0;
+  }
+}
+
+.turn-banner h2 {
+  font-family: 'Cinzel', serif;
+  font-size: 2.4rem;
+  font-weight: 900;
+  background: linear-gradient(135deg, var(--gold), #fff8e1, var(--gold));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  text-shadow: none;
+  letter-spacing: 3px;
+}
+
+.turn-banner p {
+  font-family: 'Inter', sans-serif;
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+  letter-spacing: 4px;
+  text-transform: uppercase;
+}
+
+.turn-banner-line {
+  width: 200px;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--gold), transparent);
+  margin: 4px 0;
+}
+
+/* ─── P2-8: Mana Crystal Animation ──────────────────── */
+
+.mana-crystal-float {
+  position: absolute;
+  font-size: 0.9rem;
+  pointer-events: none;
+  z-index: 60;
+  animation: mana-crystal-rise 1s ease-out forwards;
+}
+
+@keyframes mana-crystal-rise {
+  0% {
+    opacity: 1;
+    transform: translateY(0) scale(0.5);
+  }
+
+  30% {
+    opacity: 1;
+    transform: translateY(-15px) scale(1.2);
+  }
+
+  100% {
+    opacity: 0;
+    transform: translateY(-50px) scale(0.8);
+  }
+}
+
+/* ─── P2-9: Chain Reaction Pulse ────────────────────── */
+
+.chain-flash {
+  position: fixed;
+  inset: 0;
+  z-index: 150;
+  pointer-events: none;
+  animation: chain-pulse 0.25s ease-out forwards;
+}
+
+@keyframes chain-pulse {
+  0% {
+    background: rgba(255, 213, 79, 0.15);
+  }
+
+  50% {
+    background: rgba(255, 213, 79, 0.05);
+  }
+
+  100% {
+    background: transparent;
+  }
+}
+
+/* ─── P2-10: Enhanced Game Over ─────────────────────── */
+
+.game-over {
+  overflow: hidden;
+}
+
+.game-over h1 {
+  animation: victory-title-in 0.8s cubic-bezier(0.34, 1.56, 0.64, 1) !important;
+}
+
+@keyframes victory-title-in {
+  0% {
+    transform: scale(0.3);
+    opacity: 0;
+    filter: blur(10px);
+  }
+
+  50% {
+    transform: scale(1.15);
+    opacity: 1;
+    filter: blur(0);
+  }
+
+  70% {
+    transform: scale(0.95);
+  }
+
+  100% {
+    transform: scale(1);
+    opacity: 1;
+    filter: blur(0);
+  }
+}
+
+.game-over h2 {
+  animation: victory-subtitle-in 0.6s ease-out 0.3s both !important;
+}
+
+@keyframes victory-subtitle-in {
+  0% {
+    transform: translateY(20px);
+    opacity: 0;
+  }
+
+  100% {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+.game-over .menu-btn {
+  animation: victory-btn-in 0.5s ease-out 0.6s both;
+}
+
+@keyframes victory-btn-in {
+  0% {
+    transform: translateY(30px) scale(0.8);
+    opacity: 0;
+  }
+
+  100% {
+    transform: translateY(0) scale(1);
+    opacity: 1;
+  }
+}
+
+/* Victory particles container */
+.victory-particles {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.victory-particle {
+  position: absolute;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  animation: victory-fall linear forwards;
+}
+
+@keyframes victory-fall {
+  0% {
+    opacity: 1;
+    transform: translateY(-10px) rotate(0deg);
+  }
+
+  100% {
+    opacity: 0;
+    transform: translateY(100vh) rotate(720deg);
+  }
+}
+
+/* Defeat vignette */
+.defeat-vignette {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  animation: defeat-close 1.2s ease-out forwards;
+}
+
+@keyframes defeat-close {
+  0% {
+    box-shadow: inset 0 0 0px rgba(0, 0, 0, 0);
+  }
+
+  100% {
+    box-shadow: inset 0 0 200px 60px rgba(0, 0, 0, 0.7);
+  }
+}
+
+.game-over.defeat h1 {
+  color: var(--lp-red) !important;
+  background: linear-gradient(135deg, #ef5350, #ff8a80, #ef5350) !important;
+  -webkit-background-clip: text !important;
+  -webkit-text-fill-color: transparent !important;
+  background-clip: text !important;
+  text-shadow: none !important;
+}
+
+/* ─── P2-11: Playable Card Glow Pulse ───────────────── */
+
+.hand-card.playable {
+  animation: playable-pulse 2s ease-in-out infinite !important;
+}
+
+@keyframes playable-pulse {
+
+  0%,
+  100% {
+    box-shadow: 0 0 8px rgba(102, 187, 106, 0.25);
+  }
+
+  50% {
+    box-shadow: 0 0 18px rgba(102, 187, 106, 0.5), 0 0 30px rgba(102, 187, 106, 0.15);
+  }
+}
+
+/* ─── P3-12: Landmark Ambient Glow ──────────────────── */
+
+.landmark-slot.has-card {
+  animation: landmark-breathe 3s ease-in-out infinite !important;
+}
+
+@keyframes landmark-breathe {
+
+  0%,
+  100% {
+    box-shadow: 0 0 12px rgba(255, 213, 79, 0.15);
+  }
+
+  50% {
+    box-shadow: 0 0 24px rgba(255, 213, 79, 0.3), 0 0 40px rgba(255, 213, 79, 0.1);
+  }
+}
+
+/* ─── P3-13: Field Background Particle Drift ────────── */
+
+.field-particles {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.field-particle {
+  position: absolute;
+  width: 2px;
+  height: 2px;
+  border-radius: 50%;
+  background: rgba(255, 213, 79, 0.15);
+  animation: particle-drift linear infinite;
+}
+
+@keyframes particle-drift {
+  0% {
+    opacity: 0;
+    transform: translateY(0) translateX(0);
+  }
+
+  10% {
+    opacity: 1;
+  }
+
+  90% {
+    opacity: 1;
+  }
+
+  100% {
+    opacity: 0;
+    transform: translateY(-100vh) translateX(20px);
+  }
+}
+
+/* ─── P3-14: Card Hover Tilt (3D Perspective) ────────── */
+
+.hand-card {
+  transform-style: preserve-3d;
+}
+
+.hand-card.tilt-3d {
+  transition: transform 0.1s ease-out !important;
+}
+
+/* ─── P3-15: Phase Bar Slide Indicator ──────────────── */
+
+.phase-bar {
+  position: relative;
+}
+
+.phase-step {
+  position: relative;
+  z-index: 1;
+}
+
+.phase-step.active::after {
+  content: '';
+  position: absolute;
+  bottom: -2px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 20px;
+  height: 2px;
+  background: var(--gold);
+  border-radius: 1px;
+  box-shadow: 0 0 6px rgba(255, 213, 79, 0.5);
+  animation: phase-indicator-in 0.3s ease-out;
+}
+
+@keyframes phase-indicator-in {
+  0% {
+    width: 0;
+    opacity: 0;
+  }
+
+  100% {
+    width: 20px;
+    opacity: 1;
+  }
+}
+
+/* ─── P3-16: Keyword Effect Bursts ──────────────────── */
+
+.keyword-burst {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  font-family: 'Cinzel', serif;
+  font-size: 0.7rem;
+  font-weight: 900;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  pointer-events: none;
+  z-index: 65;
+  padding: 4px 12px;
+  border-radius: 4px;
+  white-space: nowrap;
+  animation: keyword-pop 0.9s ease-out forwards;
+}
+
+.keyword-burst.pierce {
+  color: #ff4444;
+  background: rgba(255, 68, 68, 0.15);
+  border: 1px solid rgba(255, 68, 68, 0.4);
+  text-shadow: 0 0 8px rgba(255, 68, 68, 0.6);
+}
+
+.keyword-burst.shadow {
+  color: #9c27b0;
+  background: rgba(156, 39, 176, 0.15);
+  border: 1px solid rgba(156, 39, 176, 0.4);
+  text-shadow: 0 0 8px rgba(156, 39, 176, 0.6);
+}
+
+.keyword-burst.guardian {
+  color: #4fc3f7;
+  background: rgba(79, 195, 247, 0.15);
+  border: 1px solid rgba(79, 195, 247, 0.4);
+  text-shadow: 0 0 8px rgba(79, 195, 247, 0.6);
+}
+
+.keyword-burst.swift {
+  color: #66bb6a;
+  background: rgba(102, 187, 106, 0.15);
+  border: 1px solid rgba(102, 187, 106, 0.4);
+  text-shadow: 0 0 8px rgba(102, 187, 106, 0.6);
+}
+
+@keyframes keyword-pop {
+  0% {
+    transform: translate(-50%, -50%) scale(0.3);
+    opacity: 0;
+  }
+
+  25% {
+    transform: translate(-50%, -50%) scale(1.3);
+    opacity: 1;
+  }
+
+  50% {
+    transform: translate(-50%, -60%) scale(1);
+    opacity: 1;
+  }
+
+  100% {
+    transform: translate(-50%, -80%) scale(0.8);
+    opacity: 0;
+  }
+}
+
+/* ─── P3-17: Summoning Circle ───────────────────────── */
+
+.summon-circle {
+  position: absolute;
+  inset: -10px;
+  border-radius: 50%;
+  pointer-events: none;
+  z-index: -1;
+  animation: summon-circle-anim 0.6s ease-out forwards;
+}
+
+@keyframes summon-circle-anim {
+  0% {
+    opacity: 0;
+    transform: scale(0.3) rotate(0deg);
+    box-shadow: inset 0 0 20px rgba(255, 213, 79, 0.5), 0 0 30px rgba(255, 213, 79, 0.3);
+  }
+
+  40% {
+    opacity: 1;
+    transform: scale(1.2) rotate(90deg);
+    box-shadow: inset 0 0 30px rgba(255, 213, 79, 0.7), 0 0 50px rgba(255, 213, 79, 0.4);
+  }
+
+  100% {
+    opacity: 0;
+    transform: scale(1.5) rotate(180deg);
+    box-shadow: inset 0 0 0px transparent, 0 0 0px transparent;
+  }
+}
+
+/* ─── P3-18: Damage Flash on Units ──────────────────── */
+
+.game-card.damage-flash {
+  animation: unit-damage-flash 0.35s ease-out;
+}
+
+@keyframes unit-damage-flash {
+  0% {
+    filter: brightness(1);
+  }
+
+  20% {
+    filter: brightness(0.4) saturate(2);
+    box-shadow: 0 0 15px rgba(255, 23, 68, 0.6);
+  }
+
+  40% {
+    filter: brightness(1.8);
+    box-shadow: 0 0 10px rgba(255, 23, 68, 0.3);
+  }
+
+  60% {
+    filter: brightness(0.7);
+  }
+
+  100% {
+    filter: brightness(1);
+    box-shadow: none;
+  }
+}
+
+/* ─── Hand Selection Mode ───────────────────────────── */
+
+.hand-select-banner {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 200;
+  background: rgba(10, 12, 20, 0.95);
+  backdrop-filter: blur(16px);
+  border-top: 1px solid rgba(255, 213, 79, 0.3);
+  padding: 12px 20px;
+  animation: banner-slide-up 0.3s ease-out;
+}
+
+@keyframes banner-slide-up {
+  0% {
+    transform: translateY(100%);
+  }
+
+  100% {
+    transform: translateY(0);
+  }
+}
+
+.hand-select-content {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  font-family: 'Inter', sans-serif;
+  font-size: 0.9rem;
+  color: var(--gold);
+}
+
+.hand-select-cancel {
+  padding: 6px 16px !important;
+  font-size: 0.75rem !important;
+}
+
+.hand-card.hand-selectable {
+  animation: hand-select-pulse 1s ease-in-out infinite !important;
+  cursor: pointer !important;
+  z-index: 20;
+}
+
+@keyframes hand-select-pulse {
+
+  0%,
+  100% {
+    box-shadow: 0 0 10px rgba(255, 213, 79, 0.4), 0 0 20px rgba(255, 213, 79, 0.15);
+    border: 2px solid rgba(255, 213, 79, 0.6);
+  }
+
+  50% {
+    box-shadow: 0 0 20px rgba(255, 213, 79, 0.7), 0 0 40px rgba(255, 213, 79, 0.25);
+    border: 2px solid rgba(255, 213, 79, 0.9);
+  }
+}
+
+/* ─── Popup Card Hover Preview ──────────────────────── */
+
+.popup-card-thumb {
+  cursor: pointer;
+  transition: transform 0.15s ease-out, box-shadow 0.15s ease-out;
+}
+
+.popup-card-thumb:hover {
+  transform: scale(1.05);
+  box-shadow: 0 0 12px rgba(255, 213, 79, 0.3) !important;
+}

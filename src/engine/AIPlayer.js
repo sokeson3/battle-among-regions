@@ -16,10 +16,17 @@ export class AIPlayer {
         this.difficulty = difficulty;
         this.actionDelay = difficulty === 'easy' ? 600 : difficulty === 'medium' ? 450 : 350;
         this.isThinking = false;
+        this.onAction = null; // Callback: (actionType, data) => void — for UI to show AI actions
     }
 
     _delay(ms) {
         return new Promise(r => setTimeout(r, ms || this.actionDelay));
+    }
+
+    async _notifyAction(actionType, data = {}) {
+        if (this.onAction) {
+            await this.onAction(actionType, data);
+        }
     }
 
     /**
@@ -92,6 +99,7 @@ export class AIPlayer {
                 if (bestUnit) {
                     await this._delay();
                     const position = this._choosePosition(bestUnit, player);
+                    await this._notifyAction('summon', { card: bestUnit, position });
                     const result = await this.controller.playUnit(this.playerId, bestUnit.instanceId, position);
                     if (result.success) {
                         playedSomething = true;
@@ -107,6 +115,7 @@ export class AIPlayer {
                 const spell = this._pickBestSpell(spellPlays);
                 if (spell) {
                     await this._delay();
+                    await this._notifyAction('spell', { card: spell });
                     const result = await this.controller.playSpell(this.playerId, spell.instanceId);
                     if (result.success) {
                         playedSomething = true;
@@ -121,6 +130,7 @@ export class AIPlayer {
             if (trapSets.length > 0) {
                 const trap = trapSets[0]; // Set the first available trap
                 await this._delay();
+                await this._notifyAction('setTrap', { card: trap });
                 const result = await this.controller.setTrap(this.playerId, trap.instanceId);
                 if (result.success) {
                     playedSomething = true;
@@ -133,7 +143,36 @@ export class AIPlayer {
             const landmarkPlays = this._getPlayableLandmarks(player);
             if (landmarkPlays.length > 0) {
                 await this._delay();
+                await this._notifyAction('landmark', { card: landmarkPlays[0] });
                 const result = await this.controller.playLandmark(this.playerId, landmarkPlays[0].instanceId);
+                if (result.success) {
+                    playedSomething = true;
+                    this.controller._notifyUI();
+                    continue;
+                }
+            }
+
+            // 5. Activate unit abilities
+            const activatableUnits = this._getActivatableUnits(player);
+            if (activatableUnits.length > 0) {
+                const unit = activatableUnits[0];
+                await this._delay();
+                await this._notifyAction('ability', { card: unit });
+                const result = await this.controller.activateAbility(this.playerId, unit.instanceId);
+                if (result.success) {
+                    playedSomething = true;
+                    this.controller._notifyUI();
+                    continue;
+                }
+            }
+
+            // 6. Set spells face-down (if we have spare slots and spells we can't afford to play)
+            const settableSpells = this._getSettableSpells(player);
+            if (settableSpells.length > 0) {
+                const spell = settableSpells[0];
+                await this._delay();
+                await this._notifyAction('setSpell', { card: spell });
+                const result = await this.controller.setSpell(this.playerId, spell.instanceId);
                 if (result.success) {
                     playedSomething = true;
                     this.controller._notifyUI();
@@ -172,6 +211,7 @@ export class AIPlayer {
                 const target = this._pickBestTarget(attacker, opponent);
                 if (target) {
                     await this._delay();
+                    await this._notifyAction('attack', { attacker, target });
                     const result = await this.controller.declareAttack(this.playerId, attacker.instanceId, target);
                     if (result.success) {
                         attackedSomething = true;
@@ -209,6 +249,21 @@ export class AIPlayer {
         return player.hand.filter(c =>
             c.type === 'Landmark' &&
             this.controller.actionValidator.canPlayLandmark(this.playerId, c).valid
+        );
+    }
+
+    _getActivatableUnits(player) {
+        return player.getFieldUnits()
+            .filter(u => this.controller.actionValidator.canActivateAbility(this.playerId, u).valid)
+            .sort((a, b) => ((b.currentATK || 0) + (b.currentDEF || 0)) - ((a.currentATK || 0) + (a.currentDEF || 0)));
+    }
+
+    _getSettableSpells(player) {
+        return player.hand.filter(c =>
+            c.type === 'Spell' &&
+            this.controller.actionValidator.canSetSpell(this.playerId, c).valid &&
+            // Only set spells we can't afford to play right now
+            !this.controller.actionValidator.canPlaySpell(this.playerId, c).valid
         );
     }
 

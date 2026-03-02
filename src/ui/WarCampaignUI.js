@@ -111,7 +111,7 @@ export class WarCampaignUI {
     this._startDeckBuildPhase();
   }
 
-  // ─── Deck Building Phase (Shared Serpentine Draft) ───
+  // ─── Deck Building Phase (Region-Rotation Draft) ──────
 
   async _startDeckBuildPhase() {
     const roundDef = this.state.getRoundDef();
@@ -133,124 +133,167 @@ export class WarCampaignUI {
       return;
     }
 
-    // ── Build the shared draft pool ──
-    // Track which draftIds have been claimed (shared across all players)
-    const claimedDraftIds = new Set();
-    const playerDecks = {};
-    for (const p of this.state.players) {
-      playerDecks[p.id] = [...p.deck];
-      // Mark existing cards as claimed (use card IDs for existing deck)
-      for (const cid of p.deck) claimedDraftIds.add(cid);
-    }
-
+    const allRegions = ['Northern', 'Eastern', 'Southern', 'Western'];
+    const playerCount = this.state.playerCount;
     const targetSize = roundDef.deckSize;
+    const minLandmarks = roundDef.minLandmarks || 0;
+    let draftIdCounter = 0;
 
-    // ── Helper: build the available pool with quantity expansion ──
-    const buildPool = (player) => {
-      const allRegions = ['Northern', 'Eastern', 'Southern', 'Western'];
+    // ── Helper: Build a region's card pool ──
+    const buildRegionPool = (region) => {
+      const regionCards = cardDB.getCardsByRegion(region)
+        .filter(c => c.type !== 'Token' && c.quantity > 0);
       const pool = [];
-      let draftIdCounter = 0;
-
-      for (const region of allRegions) {
-        let regionCards = cardDB.getCardsByRegion(region)
-          .filter(c => c.type !== 'Token' && c.quantity > 0);
-
-        // Remove landmarks if this is NOT the player's own region
-        if (region !== player.region) {
-          regionCards = regionCards.filter(c => c.type !== 'Landmark');
-        }
-
-        // Expand each card by its quantity (multiple copies)
-        for (const card of regionCards) {
-          for (let copy = 0; copy < card.quantity; copy++) {
-            const draftId = `${card.id}_draft_${draftIdCounter++}`;
-            // Skip if this draftId is already claimed
-            if (claimedDraftIds.has(draftId)) continue;
-            pool.push({ ...card, draftId });
-          }
+      for (const card of regionCards) {
+        for (let copy = 0; copy < card.quantity; copy++) {
+          pool.push({ ...card, draftId: `${card.id}_draft_${draftIdCounter++}` });
         }
       }
-
-      // Remove cards whose base ID has been fully claimed
-      // Count how many copies of each card ID are already claimed by this player
-      const claimedCountByCardId = {};
-      for (const cid of playerDecks[player.id]) {
-        claimedCountByCardId[cid] = (claimedCountByCardId[cid] || 0) + 1;
-      }
-      // Also count cards claimed by other players
-      for (const otherPlayer of this.state.players) {
-        if (otherPlayer.id === player.id) continue;
-        for (const cid of playerDecks[otherPlayer.id]) {
-          claimedCountByCardId[cid] = (claimedCountByCardId[cid] || 0) + 1;
-        }
-      }
-
-      // Filter pool: for each card ID, only keep copies that haven't been claimed
-      const availableCountByCardId = {};
-      return pool.filter(entry => {
-        const cardId = entry.id;
-        const template = cardDB.getCard(cardId);
-        if (!template) return false;
-        const totalClaimed = claimedCountByCardId[cardId] || 0;
-        availableCountByCardId[cardId] = (availableCountByCardId[cardId] || 0) + 1;
-        // Only include if this copy number is within the remaining quantity
-        return availableCountByCardId[cardId] <= (template.quantity - totalClaimed);
-      });
+      return pool;
     };
 
-    // ── Draft: alternate players, each picks freely until target ──
-    let playerIdx = 0;
-    while (true) {
-      // Check if all players reached target
+    // ── Determine region assignment and pass order ──
+    // Each player has their own region. Non-chosen regions are placed as piles.
+    const chosenRegions = this.state.players.map(p => p.region);
+    const nonChosenRegions = allRegions.filter(r => !chosenRegions.includes(r));
+
+    // Build initial region pools
+    const regionPools = {};
+    for (const region of allRegions) {
+      regionPools[region] = buildRegionPool(region);
+    }
+
+    // ── Build the pass order for each player ──
+    // passSlots: array of "seats" around the table, each containing { owner, pool }
+    // Players sit at indices 0..playerCount-1, and non-chosen regions fill remaining "seats"
+    let seats = []; // each seat = { ownerId: player.id | null, region, pool }
+
+    if (playerCount === 2) {
+      // 2-Player: 4 seats total. Players at 0 and 1, non-chosen at 2 and 3 (randomised)
+      const shuffledNonChosen = [...nonChosenRegions].sort(() => Math.random() - 0.5);
+      seats = [
+        { ownerId: 0, region: this.state.players[0].region },
+        { ownerId: null, region: shuffledNonChosen[0] },
+        { ownerId: 1, region: this.state.players[1].region },
+        { ownerId: null, region: shuffledNonChosen[1] },
+      ];
+    } else if (playerCount === 3) {
+      // 3-Player: Players 0, 1, 2. Non-chosen region placed between player 2 & 3 (index 2 & 0).
+      // So seats: [P0, P1, non-chosen, P2] — pass left means P0→P1→nonChosen→P2→P0
+      seats = [
+        { ownerId: 0, region: this.state.players[0].region },
+        { ownerId: 1, region: this.state.players[1].region },
+        { ownerId: null, region: nonChosenRegions[0] },
+        { ownerId: 2, region: this.state.players[2].region },
+      ];
+    } else {
+      // 4-Player: all seats are players
+      seats = this.state.players.map(p => ({
+        ownerId: p.id, region: p.region,
+      }));
+    }
+
+    // Each seat starts with its region's pool
+    for (const seat of seats) {
+      seat.pool = regionPools[seat.region];
+    }
+
+    // Track each player's picks and landmark counts
+    const playerPicks = {};   // playerId → cardId[]
+    const landmarkCounts = {}; // playerId → number
+    for (const p of this.state.players) {
+      playerPicks[p.id] = [...p.deck]; // start with existing deck for intermission
+      landmarkCounts[p.id] = 0;
+      // Count existing landmarks
+      for (const cardId of p.deck) {
+        const card = cardDB.getCard(cardId);
+        if (card && card.type === 'Landmark') {
+          landmarkCounts[p.id]++;
+        }
+      }
+    }
+
+    // ── Rotation: keep passing pools until all players reach target ──
+    let pass = 0;
+    const maxPasses = 20; // safety cap
+
+    while (pass < maxPasses) {
+      // Check if all players have enough cards
       const allDone = this.state.players.every(
-        p => playerDecks[p.id].length >= targetSize
+        p => playerPicks[p.id].length >= targetSize
       );
       if (allDone) break;
 
-      const player = this.state.players[playerIdx % this.state.players.length];
-      playerIdx++;
+      // Check if any pools have cards left
+      const totalPoolCards = seats.reduce((sum, s) => sum + s.pool.length, 0);
+      if (totalPoolCards === 0) break;
 
-      // Skip if this player already has enough cards
-      if (playerDecks[player.id].length >= targetSize) continue;
+      // For each player seat, show the draft screen for the pool currently at their seat
+      for (const seat of seats) {
+        if (seat.ownerId === null) continue; // non-chosen pile seats skip UI
 
-      // Build the available pool for this player
-      const availablePool = buildPool(player);
+        const player = this.state.players.find(p => p.id === seat.ownerId);
+        if (!player) continue;
+        if (playerPicks[player.id].length >= targetSize) continue;
 
-      // Skip if nothing available
-      if (availablePool.length === 0) continue;
+        // Filter pool: only show landmarks if from player's own region
+        const filteredPool = seat.pool.filter(c =>
+          c.type !== 'Landmark' || c.region === player.region
+        );
 
-      // How many can they pick?
-      const remaining = targetSize - playerDecks[player.id].length;
+        if (filteredPool.length === 0) continue;
 
-      // Show transition
-      await this._showTransition(
-        `${player.name}'s Turn to Draft`,
-        `Pick cards for your deck\nDeck: ${playerDecks[player.id].length} / ${targetSize}`
-      );
+        // Show transition screen for this player's turn
+        await this._showTransition(
+          `${player.name}'s Turn to Draft`,
+          `Region Rotation — Pass ${pass + 1}\nDeck: ${playerPicks[player.id].length} / ${targetSize}`
+        );
 
-      // Show the draft screen — player picks freely from all regions
-      const picks = await this.deckBuilder.showDraftPick({
-        playerName: player.name,
-        playerRegion: player.region,
-        available: availablePool,
-        maxPicks: remaining,
-        currentDeckSize: playerDecks[player.id].length,
-        targetDeckSize: targetSize,
-        mustStartOwn: playerDecks[player.id].length === 0, // Must start from own region on first draft
-      });
+        const result = await this.deckBuilder.showRegionRotationDraft({
+          playerName: player.name,
+          playerRegion: player.region,
+          regionPool: filteredPool,
+          regionName: seat.pool.length > 0 ? seat.pool[0].region : 'Unknown',
+          passNumber: pass + 1,
+          totalPasses: '?',
+          currentDeckSize: playerPicks[player.id].length,
+          targetDeckSize: targetSize,
+          existingDeckCardIds: playerPicks[player.id],
+          minLandmarks: minLandmarks,
+          currentLandmarks: landmarkCounts[player.id],
+        });
 
-      // Record the picks
-      for (const cardId of picks) {
-        playerDecks[player.id].push(cardId);
+        // Record picks
+        for (const cardId of result.picked) {
+          playerPicks[player.id].push(cardId);
+          const card = cardDB.getCard(cardId);
+          if (card && card.type === 'Landmark') {
+            landmarkCounts[player.id]++;
+          }
+        }
+
+        // Update seat pool: remaining items from the draft + items that were filtered out
+        // (non-own-region landmarks that were hidden from this player but still in the pool)
+        const remainingDraftIds = new Set(result.remaining.map(c => c.draftId));
+        const filteredDraftIds = new Set(filteredPool.map(c => c.draftId));
+        seat.pool = seat.pool.filter(c =>
+          remainingDraftIds.has(c.draftId) || !filteredDraftIds.has(c.draftId)
+        );
       }
 
-      // Safety: prevent infinite loop
-      if (playerIdx > this.state.players.length * 20) break;
+      // ── Pass pools: shift left (each seat gives pool to seat on its left) ──
+      const pools = seats.map(s => s.pool);
+      // Rotate: each seat receives from the seat on its right
+      for (let i = 0; i < seats.length; i++) {
+        seats[i].pool = pools[(i + 1) % seats.length];
+      }
+
+      pass++;
     }
 
     // Save decks back to campaign state
     for (const p of this.state.players) {
-      p.deck = playerDecks[p.id];
+      p.deck = playerPicks[p.id];
     }
 
     this.state.save();

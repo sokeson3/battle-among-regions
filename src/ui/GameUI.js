@@ -4,6 +4,7 @@
 
 import { PHASES } from '../engine/GameState.js';
 import { DuelDeckBuilderUI } from './DuelDeckBuilderUI.js';
+import { AIPlayer } from '../engine/AIPlayer.js';
 
 export class GameUI {
   /**
@@ -15,6 +16,8 @@ export class GameUI {
     this.selectedCard = null;
     this.attackingUnit = null;
     this.currentScreen = 'menu';
+    this.ai = null;           // AIPlayer instance for vs-AI mode
+    this._aiTurnInProgress = false;
     this.playerConfigs = [];
     this.playerCount = 2;  // 2, 3, or 4
     this.previewTimeout = null;
@@ -30,6 +33,14 @@ export class GameUI {
     this._attackArrowSvg = null;    // SVG element for attack arrow
     this._attackArrowLine = null;   // SVG line/path for arrow
     this._attackArrowOrigin = null; // { x, y } origin of attack arrow
+
+    // Visual effects tracking
+    this._lastLP = {};              // Track LP per player for screen shake
+    this._lastFieldUnits = {};      // Track field units per player for destruction particles
+    this._lastFieldSpellTraps = {}; // Track spell/trap state for flip animation
+    this._lastMana = {};            // Track mana per player for crystal animation
+    this._lastUnitDamage = {};       // Track unit damage for damage flash
+    this._fieldParticlesCreated = false; // Prevent duplicate field particles
 
     // Wire up callbacks
     controller.onUIUpdate = (gs) => this._onUIUpdate(gs);
@@ -49,10 +60,13 @@ export class GameUI {
         <h1 class="menu-title">Battle Among Regions</h1>
         <p class="menu-subtitle">War for Supremacy</p>
         <div class="menu-buttons">
-          <button class="menu-btn primary" id="btn-duel">Regional Match (2P)</button>
+          <button class="menu-btn primary" id="btn-vs-ai">⚔ vs AI</button>
+          <!-- Hot-seat buttons removed (kept for later)
+          <button class="menu-btn" id="btn-duel">Regional Match (2P)</button>
           <button class="menu-btn" id="btn-3p">3-Player Match</button>
           <button class="menu-btn" id="btn-4p">4-Player Match</button>
           <button class="menu-btn campaign-glow" id="btn-war-campaign">⚔ War Campaign</button>
+          -->
           <button class="menu-btn" id="btn-campaign">Solo Campaign</button>
           <button class="menu-btn" id="btn-deck-builder">⚔ Deck Builder</button>
           <button class="menu-btn online-glow" id="btn-online">🌐 Online Match</button>
@@ -117,6 +131,7 @@ export class GameUI {
       }
     };
 
+    /* Hot-seat handlers removed (kept for later)
     document.getElementById('btn-duel').onclick = () => { this.playerCount = 2; this.playerConfigs = []; this.showRegionSelect(0, 'duel'); };
     document.getElementById('btn-3p').onclick = () => { this.playerCount = 3; this.playerConfigs = []; this.showRegionSelect(0, 'duel'); };
     document.getElementById('btn-4p').onclick = () => { this.playerCount = 4; this.playerConfigs = []; this.showRegionSelect(0, 'duel'); };
@@ -125,6 +140,8 @@ export class GameUI {
         this.warCampaignUI.showPlayerCountSelect();
       }
     };
+    */
+    document.getElementById('btn-vs-ai').onclick = () => { this.showAIRegionSelect(); };
     document.getElementById('btn-campaign').onclick = () => {
       if (this.campaignUI) {
         const progress = this.campaignUI.progress;
@@ -163,6 +180,205 @@ export class GameUI {
         }
       }
     };
+  }
+
+  // ─── vs AI Mode ─────────────────────────────────────────────
+
+  showAIRegionSelect() {
+    this.currentScreen = 'region-select';
+
+    this.app.innerHTML = `
+      <div class="region-select">
+        <button class="global-menu-btn" id="btn-menu">☰ Menu</button>
+        <h2>Choose Your Region</h2>
+        <p class="player-label">vs AI — Select your homeland</p>
+        <div class="region-grid">
+          ${this._renderRegionCard('Northern', 'north', 'Resilient defenders. Masters of healing and fortification.', [])}
+          ${this._renderRegionCard('Eastern', 'east', 'Cunning strategists. Spell mastery and shadow tactics.', [])}
+          ${this._renderRegionCard('Southern', 'south', 'Aggressive warriors. Raw power and piercing strikes.', [])}
+          ${this._renderRegionCard('Western', 'west', 'Adaptable tricksters. Unit synergy and effect manipulation.', [])}
+        </div>
+      </div>
+    `;
+    this._wireGlobalMenuButton();
+
+    document.querySelectorAll('.region-card').forEach(card => {
+      card.onclick = async () => {
+        const region = card.dataset.region;
+        const config = { name: 'You', region };
+
+        // Offer deck choice if deck builder is available
+        if (this.deckBuilderUI) {
+          const deckIds = await this.deckBuilderUI.showDeckChoice(region, 'You');
+          if (deckIds) {
+            config.deckCardIds = deckIds;
+          }
+        }
+
+        await this.startAIGame(config);
+      };
+    });
+  }
+
+  async startAIGame(playerConfig) {
+    this.currentScreen = 'game';
+    this.playerCount = 2;
+
+    // Pick a random different region for the AI
+    const allRegions = ['Northern', 'Eastern', 'Southern', 'Western'];
+    const aiRegions = allRegions.filter(r => r !== playerConfig.region);
+    const aiRegion = aiRegions[Math.floor(Math.random() * aiRegions.length)];
+
+    this.playerConfigs = [
+      playerConfig,
+      { name: 'AI Opponent', region: aiRegion },
+    ];
+
+    const options = {
+      gameMode: 'ai',
+      startingLP: 3000,
+      startingPlayer: 0,
+    };
+
+    await this.controller.setupGame(this.playerConfigs, options);
+
+    // Create AI player
+    this.ai = new AIPlayer(this.controller, 1, 'medium');
+
+    // Wire AI callbacks for target/choice/response
+    this._wireAICallbacks();
+
+    // Auto-select landmark for AI
+    this._aiAutoSelectLandmark();
+
+    // Show landmark selection for human player, then start
+    this.showLandmarkSelect(0);
+  }
+
+  /**
+   * Wire the AI to answer target/choice queries and auto-pass on response prompts.
+   * Mirrors CampaignUI._wireAICallbacks().
+   */
+  _wireAICallbacks() {
+    const origOnTarget = this.controller.effectEngine.onTargetRequired;
+    const origOnChoice = this.controller.effectEngine.onChoiceRequired;
+    const origOnResponse = this.controller.onOpponentResponse;
+
+    this.controller.effectEngine.onTargetRequired = (targets, desc, cb) => {
+      const sourcePlayerId = this.controller.effectEngine._currentSourcePlayerId;
+      if (sourcePlayerId === 1 && this.ai) {
+        const target = this.ai.chooseTarget(targets, desc);
+        setTimeout(() => cb(target), 100);
+      } else if (origOnTarget) {
+        origOnTarget(targets, desc, cb);
+      }
+    };
+
+    this.controller.effectEngine.onChoiceRequired = (options, desc, cb) => {
+      const sourcePlayerId = this.controller.effectEngine._currentSourcePlayerId;
+      if (sourcePlayerId === 1 && this.ai) {
+        const choice = this.ai.chooseOption(options, desc);
+        setTimeout(() => cb(choice), 100);
+      } else if (origOnChoice) {
+        origOnChoice(options, desc, cb);
+      }
+    };
+
+    // AI auto-passes; human gets the response dialog during AI's turn
+    this.controller.onOpponentResponse = (player, callback, chainContext) => {
+      if (player.id === 1) {
+        // AI auto-passes
+        setTimeout(() => callback({ activate: false }), 50);
+      } else if (origOnResponse) {
+        origOnResponse(player, callback, chainContext);
+      } else {
+        callback({ activate: false });
+      }
+    };
+
+    // Wire AI action callback for visual feedback
+    this.ai.onAction = async (actionType, data) => {
+      if (actionType === 'attack') {
+        // Show attack animation with attacker and target
+        const targetUnit = data.target?.type === 'unit' ? data.target.card : null;
+        const targetPlayer = data.target?.type === 'direct' ? data.target.player : null;
+        this._showAttackAnimation(data.attacker, targetUnit, targetPlayer);
+        await new Promise(r => setTimeout(r, 2400));
+      } else if (actionType === 'summon') {
+        await new Promise(r => setTimeout(r, 1500));
+      } else if (actionType === 'spell') {
+        await new Promise(r => setTimeout(r, 1500));
+      } else if (actionType === 'setTrap') {
+        await new Promise(r => setTimeout(r, 800));
+      } else if (actionType === 'landmark') {
+        await new Promise(r => setTimeout(r, 1500));
+      }
+    };
+  }
+
+  /**
+   * Auto-select a landmark for the AI opponent.
+   */
+  _aiAutoSelectLandmark() {
+    const gs = this.controller.gameState;
+    const aiPlayer = gs.getPlayerById(1);
+    if (!aiPlayer) return;
+
+    const landmarks = this.controller.cardDB.getLandmarksByRegion(aiPlayer.region);
+    if (landmarks.length > 0) {
+      const landmarkCard = this.controller.cardDB.createCardInstance(landmarks[0].id, 1);
+      if (landmarkCard) {
+        landmarkCard.faceUp = true;
+        aiPlayer.landmarkZone = landmarkCard;
+      }
+    }
+  }
+
+  /**
+   * Handle AI turn transition — render board, run AI, then transition back.
+   */
+  async _handleAITurnTransition() {
+    const gs = this.controller.gameState;
+
+    if (gs.gameOver) {
+      this.showGameOver();
+      return;
+    }
+
+    if (gs.activePlayerIndex === 1 && this.ai) {
+      this._aiTurnInProgress = true;
+      // Keep board visible from player's perspective
+      this.render();
+
+      // Show turn banner for AI turn
+      this._showTurnBanner('AI Turn', `${gs.getPlayerById(1).region} Region`);
+
+      // Brief pause before AI starts acting
+      await new Promise(r => setTimeout(r, 600));
+
+      // Let AI play its turn — wrapped in try/catch for error recovery
+      try {
+        await this.ai.performTurn();
+      } catch (err) {
+        console.error('AI turn error — recovering:', err);
+      }
+
+      this._aiTurnInProgress = false;
+
+      // After AI turn completes, check game over
+      if (gs.gameOver) {
+        this.showGameOver();
+        return;
+      }
+
+      // Render the board for player's turn (no transition screen needed)
+      // Show turn banner for player's turn
+      this._showTurnBanner('Your Turn', `Round ${gs.roundCounter}`);
+      this.render();
+    } else {
+      // Player's turn — just render (no hot-seat handoff screen)
+      this.render();
+    }
   }
 
   showRegionSelect(playerIndex, gameMode) {
@@ -244,8 +460,8 @@ export class GameUI {
       return;
     }
 
-    // In campaign mode, skip AI player's landmark (already handled)
-    if (gs.gameMode === 'campaign' && playerIndex === 1) {
+    // In campaign/ai mode, skip AI player's landmark (already handled)
+    if ((gs.gameMode === 'campaign' || gs.gameMode === 'ai') && playerIndex === 1) {
       this.showMulliganScreen(0);
       return;
     }
@@ -346,8 +562,8 @@ export class GameUI {
         gs.log('LANDMARK', `${player.name} places ${removed.name} in their Landmark Zone.`);
       }
 
-      // Next player or mulligan — skip AI in campaign
-      if (gs.gameMode === 'campaign') {
+      // Next player or mulligan — skip AI in campaign/ai mode
+      if (gs.gameMode === 'campaign' || gs.gameMode === 'ai') {
         this.showMulliganScreen(0);
       } else if (playerIndex < gs.players.length - 1) {
         const nextPlayer = gs.getPlayerById(playerIndex + 1);
@@ -359,7 +575,7 @@ export class GameUI {
     };
 
     document.getElementById('btn-skip-landmark').onclick = () => {
-      if (gs.gameMode === 'campaign') {
+      if (gs.gameMode === 'campaign' || gs.gameMode === 'ai') {
         this.showMulliganScreen(0);
       } else if (playerIndex < gs.players.length - 1) {
         const nextPlayer = gs.getPlayerById(playerIndex + 1);
@@ -428,6 +644,15 @@ export class GameUI {
           // Auto-mulligan for AI then start
           if (this.campaignUI) await this.campaignUI.handleAIMulligan();
           this.showTurnTransition();
+        } else if (gs.gameMode === 'ai') {
+          // Auto-mulligan for AI then start
+          if (this.ai) {
+            const aiPlayer = gs.getPlayerById(1);
+            const toMulligan = this.ai.chooseMulligan(aiPlayer.hand);
+            await this.controller.mulligan(1, toMulligan);
+          }
+          // Go straight to the game (no transition screen)
+          this.render();
         } else if (playerIndex < gs.players.length - 1) {
           const nextPlayer = gs.getPlayerById(playerIndex + 1);
           this.showTurnTransition(() => this.showMulliganScreen(playerIndex + 1), nextPlayer);
@@ -479,10 +704,10 @@ export class GameUI {
     const players = gs.players;
     const numPlayers = players.length;
 
-    // In campaign mode, always show from human player's perspective (player 0)
+    // In campaign/ai mode, always show from human player's perspective (player 0)
     // In other modes, active player is rendered at bottom
-    const isCampaign = gs.gameMode === 'campaign';
-    const p1 = isCampaign ? players[0] : active;
+    const isFixedPerspective = gs.gameMode === 'campaign' || gs.gameMode === 'ai';
+    const p1 = isFixedPerspective ? players[0] : active;
     // Opponents are everyone else (alive or dead for display)
     const opponents = players.filter(p => p.id !== p1.id);
 
@@ -548,6 +773,7 @@ export class GameUI {
         ${this.pendingPlacement ? `<div class="placement-instruction">Choose a field to play this card to</div>` : ''}
       `;
       this._attachListeners(p1, opponent, gs);
+      this._spawnFieldParticles();
 
     } else {
       // ─── 3 or 4 Player Layout ───────────────────────
@@ -634,6 +860,7 @@ export class GameUI {
 
       // For multi-player, pass the first opponent for attack targeting (player picks target via UI)
       this._attachListeners(p1, topOpponent, gs);
+      this._spawnFieldParticles();
     }
   }
 
@@ -828,12 +1055,14 @@ export class GameUI {
   _renderHand(player) {
     const gs = this.controller.gameState;
     const isMainPhase = gs.phase === PHASES.MAIN1 || gs.phase === PHASES.MAIN2;
+    // During AI turn, player cannot play cards
+    const isAITurn = (gs.gameMode === 'ai' || gs.gameMode === 'campaign') && gs.activePlayerIndex !== 0;
 
     return `
       <div class="hand-container">
         <div class="hand-cards">
           ${player.hand.map(card => {
-      const canPlay = isMainPhase && (
+      const canPlay = !isAITurn && isMainPhase && (
         (card.type === 'Unit' && this.controller.actionValidator.canPlayUnit(player.id, card).valid) ||
         (card.type === 'Spell' && (this.controller.actionValidator.canPlaySpell(player.id, card).valid || this.controller.actionValidator.canSetSpell(player.id, card).valid)) ||
         (card.type === 'Trap' && this.controller.actionValidator.canSetTrap(player.id, card).valid) ||
@@ -872,7 +1101,7 @@ export class GameUI {
    * Tokens overlay the card's bottom corners, covering original printed values.
    */
   _renderStatTokens(card) {
-    if (!card || card.type !== 'Unit') return '';
+    if (!card || (card.type !== 'Unit' && card.type !== 'Token')) return '';
 
     const effectiveATK = card.currentATK;
     const remainingDEF = card.currentDEF - card.damageTaken;
@@ -915,6 +1144,11 @@ export class GameUI {
   }
 
   _renderActionPanel(gs) {
+    // During AI turn, hide action buttons — player cannot act
+    if ((gs.gameMode === 'ai' || gs.gameMode === 'campaign') && gs.activePlayerIndex !== 0) {
+      return `<div class="action-panel"></div>`;
+    }
+
     const phase = gs.phase;
     const buttons = [];
 
@@ -1030,6 +1264,8 @@ export class GameUI {
       };
 
       handContainer.onclick = (e) => {
+        // Block hand interactions during AI turn
+        if ((gs.gameMode === 'ai' || gs.gameMode === 'campaign') && gs.activePlayerIndex !== 0) return;
         if (this.pendingPlacement) {
           this._showToast('Cancel placement before doing something else.');
           return;
@@ -1049,6 +1285,13 @@ export class GameUI {
 
       el.onclick = (e) => {
         e.stopPropagation();
+        // Block field card interactions during AI turn (allow zoom only)
+        if ((gs.gameMode === 'ai' || gs.gameMode === 'campaign') && gs.activePlayerIndex !== 0) {
+          if (!el.classList.contains('face-down')) {
+            this._showCardZoom(cardId || el.querySelector('img')?.alt);
+          }
+          return;
+        }
         if (this.pendingPlacement) {
           if (this.pendingPlacement.type === 'Landmark' && el.parentElement.classList.contains('landmark-slot')) {
             // allow clicking the card in the landmark slot to replace it
@@ -1066,8 +1309,10 @@ export class GameUI {
           // Show field card action menu (switch position, zoom, etc.)
           this._onFieldCardClick(el, instanceId, activePlayer, gs);
         } else {
-          // Opponent card — show zoom only
-          this._showCardZoom(cardId || el.querySelector('img')?.alt);
+          // Opponent card — show zoom only (but not if face-down)
+          if (!el.classList.contains('face-down')) {
+            this._showCardZoom(cardId || el.querySelector('img')?.alt);
+          }
         }
       };
     });
@@ -1115,6 +1360,8 @@ export class GameUI {
         this._pendingPlayAnim = { rect: p.rect, imgSrc: p.imgSrc };
 
         if (p.type === 'Unit' && isUnitZone) {
+          // Summon circle effect on the slot
+          this._showSummonCircle(el);
           this.controller.playUnit(p.player.id, p.cardInstanceId, p.position, slotIdx).then(r => {
             if (!r.success) this._showToast(r.reason);
           }).catch(err => {
@@ -1151,28 +1398,8 @@ export class GameUI {
       };
     });
 
-    // LP click for direct attack (works for any opponent in multi-player)
-    document.querySelectorAll('.player-bar').forEach(el => {
-      const pid = parseInt(el.dataset.player);
-      if (pid !== activePlayer.id && this.attackingUnit) {
-        const targetPlayer = gs.getPlayerById(pid);
-        if (targetPlayer && targetPlayer.isAlive) {
-          el.style.cursor = 'pointer';
-          el.onclick = () => {
-            const attackerUnit = activePlayer.getFieldUnits().find(u => u.instanceId === this.attackingUnit);
-            this._showAttackAnimation(attackerUnit, null, targetPlayer);
-            this.controller.declareAttack(activePlayer.id, this.attackingUnit, {
-              type: 'direct',
-              player: targetPlayer,
-            }).then(result => {
-              this.attackingUnit = null;
-              this._removeAttackArrow();
-              if (!result.success) this._showToast(result.reason);
-            });
-          };
-        }
-      }
-    });
+    // LP bar click — direct attack is now handled by the action menu dialog,
+    // so no LP-click handler is needed.
 
     // Action buttons
     const btnBattle = document.getElementById('btn-battle');
@@ -1193,8 +1420,22 @@ export class GameUI {
         }
         if (gs.gameMode === 'campaign' && this.campaignUI) {
           this.campaignUI.handleTurnTransition();
+        } else if (gs.gameMode === 'ai') {
+          this._handleAITurnTransition();
         } else {
           this.showTurnTransition();
+        }
+      }).catch(err => {
+        console.error('End turn error — recovering:', err);
+        // Ensure the game doesn't get stuck: attempt AI transition anyway
+        if (gs.gameOver) {
+          this.showGameOver();
+        } else if (gs.gameMode === 'ai') {
+          this._handleAITurnTransition();
+        } else if (gs.gameMode === 'campaign' && this.campaignUI) {
+          this.campaignUI.handleTurnTransition();
+        } else {
+          this.render();
         }
       });
     };
@@ -1441,6 +1682,20 @@ export class GameUI {
       if (isMainPhase && spellTrap.type === 'Spell') {
         options.push({ label: '✦ Activate', value: 'activate_set', icon: '✦' });
       }
+      // Allow face-down Traps with SELF trigger to be activated during Main Phase (e.g. E048)
+      if (isMainPhase && spellTrap.type === 'Trap' && !spellTrap.setThisTurn) {
+        const effects = this.controller.effectEngine.getEffects(spellTrap.cardId);
+        const hasSelfTrigger = effects.some(e => e.trigger === 'SELF');
+        if (hasSelfTrigger) {
+          const canAct = this.controller.actionValidator.canActivateTrap(player.id, spellTrap, {
+            effectEngine: this.controller.effectEngine,
+            triggerContext: {}
+          });
+          if (canAct.valid) {
+            options.push({ label: '⚡ Activate', value: 'activate_set_trap', icon: '⚡' });
+          }
+        }
+      }
     }
 
     // Always allow zoom
@@ -1449,15 +1704,66 @@ export class GameUI {
 
     this._showCardActionMenu(rect, options, (choice) => {
       if (choice.value === 'attack') {
-        this.attackingUnit = instanceId;
-        this._showToast(`${unit.name} selected — click a target`);
-        this.render();
+        // Check if unit is eligible for direct attack
+        const opponents = gs.getOpponents(player.id);
+        let directTarget = null;
+        for (const opp of opponents) {
+          if (opp && opp.isAlive && this.controller.combatEngine.canTarget(unit, { type: 'direct', player: opp })) {
+            directTarget = opp;
+            break;
+          }
+        }
+
+        if (directTarget) {
+          const isShadow = unit.keywords?.includes('SHADOW');
+          const hasOpponentUnits = directTarget.getFieldUnits().length > 0;
+          this.showChoiceDialog(
+            [{ label: '✅ Yes, attack directly', value: 'yes' }, { label: '✕ No', value: 'no' }],
+            `Attack ${directTarget.name}'s LP directly with ${unit.name}?`,
+            (dialogChoice) => {
+              if (dialogChoice.value === 'yes') {
+                // Direct attack on LP
+                this._showAttackAnimation(unit, null, directTarget);
+                this.controller.declareAttack(player.id, instanceId, {
+                  type: 'direct',
+                  player: directTarget,
+                }).then(result => {
+                  if (!result.success) this._showToast(result.reason);
+                });
+              } else if (isShadow && hasOpponentUnits) {
+                // Shadow unit: enter target selection to pick a unit
+                this.attackingUnit = instanceId;
+                this._showToast(`Select a unit to attack with ${unit.name}`);
+                this.render();
+              } else {
+                // Non-shadow or no units to attack: cancel
+                this.render();
+              }
+            }
+          );
+        } else {
+          // Not eligible for direct attack — enter target selection
+          this.attackingUnit = instanceId;
+          this._showToast(`${unit.name} selected — click a target`);
+          this.render();
+        }
       } else if (choice.value === 'switch') {
+        // Trigger position switch animation
+        const cardEl = document.querySelector(`.game-card[data-instance="${instanceId}"]`);
+        const newPos = unit.position === 'ATK' ? 'DEF' : 'ATK';
+        if (cardEl) {
+          cardEl.classList.add(newPos === 'DEF' ? 'switching-to-def' : 'switching-to-atk');
+          setTimeout(() => cardEl.classList.remove('switching-to-def', 'switching-to-atk'), 350);
+        }
         this.controller.changePosition(player.id, instanceId).then(r => {
           if (!r.success) this._showToast(r.reason);
         });
       } else if (choice.value === 'activate_set') {
         this.controller.activateSetSpell(player.id, instanceId).then(r => {
+          if (!r.success) this._showToast(r.reason);
+        });
+      } else if (choice.value === 'activate_set_trap') {
+        this.controller.activateTrap(player.id, instanceId).then(r => {
           if (!r.success) this._showToast(r.reason);
         });
       } else if (choice.value === 'activate_ability') {
@@ -1486,14 +1792,15 @@ export class GameUI {
     if (target) {
       const activePlayer = gs.getActivePlayer();
       const attackerUnit = activePlayer.getFieldUnits().find(u => u.instanceId === this.attackingUnit);
+      const attackerInstanceId = this.attackingUnit;
+      this.attackingUnit = null;
+      this._removeAttackArrow();
       this._showAttackAnimation(attackerUnit, target, null);
-      this.controller.declareAttack(gs.activePlayerIndex, this.attackingUnit, {
+      this.controller.declareAttack(gs.activePlayerIndex, attackerInstanceId, {
         type: 'unit',
         card: target,
         player: opponent,
       }).then(result => {
-        this.attackingUnit = null;
-        this._removeAttackArrow();
         if (!result.success) this._showToast(result.reason);
       });
     }
@@ -1507,7 +1814,22 @@ export class GameUI {
       return;
     }
 
-    // Always show choice dialog with target names (even for single targets)
+    // Check if all targets are cards from the active player's hand
+    const gs = this.controller.gameState;
+    const activePlayer = gs.getActivePlayer();
+    const handInstanceIds = activePlayer.hand.map(c => c.instanceId);
+    const allInHand = targets.every(t => {
+      const instanceId = t.instanceId || t.card?.instanceId;
+      return instanceId && handInstanceIds.includes(instanceId);
+    });
+
+    if (allInHand && targets.length > 0) {
+      // Hand-based selection: highlight cards in hand and let player click them
+      this._showHandSelection(targets, description, callback);
+      return;
+    }
+
+    // Standard popup target selection
     const options = targets.map((t, i) => ({
       label: t.name || t.card?.name || `Target ${i + 1}`,
       value: i,
@@ -1527,7 +1849,9 @@ export class GameUI {
         const cId = cardId || targets[i].cardId;
         return `
                 <div class="choice-option" data-idx="${i}" style="display:flex;flex-direction:column;align-items:center;padding:8px;max-width:120px">
-                  <img src="./output-web/${cId}.webp" alt="${opt.label}" style="width:80px;height:112px;object-fit:contain;border-radius:6px;margin-bottom:6px;border:1px solid var(--glass-border)" />
+                  <img src="./output-web/${cId}.webp" alt="${opt.label}"
+                       class="popup-card-thumb" data-card-id="${cId}"
+                       style="width:80px;height:112px;object-fit:contain;border-radius:6px;margin-bottom:6px;border:1px solid var(--glass-border)" />
                   <span style="font-size:0.7rem;text-align:center">${opt.label}</span>
                 </div>
               `;
@@ -1554,6 +1878,9 @@ export class GameUI {
       overlay.remove();
       callback(null);
     };
+
+    // Hover-to-zoom on card images in the target dialog
+    this._attachPopupHoverZoom(overlay);
   }
 
   // ─── Choice Dialog ────────────────────────────────────────
@@ -1572,7 +1899,9 @@ export class GameUI {
       if (cardId) {
         return `
                 <div class="choice-option" data-idx="${i}" style="display:flex;flex-direction:column;align-items:center;padding:8px;max-width:120px">
-                  <img src="./output-web/${cardId}.webp" alt="${opt.label}" style="width:80px;height:112px;object-fit:contain;border-radius:6px;margin-bottom:6px;border:1px solid var(--glass-border)" />
+                  <img src="./output-web/${cardId}.webp" alt="${opt.label}"
+                       class="popup-card-thumb" data-card-id="${cardId}"
+                       style="width:80px;height:112px;object-fit:contain;border-radius:6px;margin-bottom:6px;border:1px solid var(--glass-border)" />
                   <span style="font-size:0.7rem;text-align:center">${opt.label}</span>
                 </div>
               `;
@@ -1592,6 +1921,9 @@ export class GameUI {
         callback(options[idx]);
       };
     });
+
+    // Hover-to-zoom on card images in the choice dialog
+    this._attachPopupHoverZoom(overlay);
   }
 
   // ─── Opponent Response Dialog ────────────────────────────
@@ -1621,7 +1953,8 @@ export class GameUI {
       if (card.type === 'Trap') {
         const result = validator.canActivateTrap(player.id, card, {
           effectEngine,
-          triggerContext
+          triggerContext,
+          triggerType
         });
         canActivate = result.valid;
         reason = result.reason || '';
@@ -1638,10 +1971,28 @@ export class GameUI {
     if (triggerType === 'attack') triggerDesc = 'an attack was declared';
     else if (triggerType === 'summon') triggerDesc = 'a unit was summoned';
     else if (triggerType === 'spell') triggerDesc = 'a spell was activated';
-    else if (triggerType === 'phase_change') triggerDesc = 'a phase change occurred';
+    else if (triggerType === 'set') triggerDesc = 'a card was set';
+    else if (triggerType === 'destroy') triggerDesc = 'a unit was destroyed';
+    else if (triggerType === 'phase_change') {
+      const phaseCtx = chainContext.triggerContext || {};
+      if (phaseCtx.phase === 'MAIN1') triggerDesc = 'Main Phase 1 has started';
+      else if (phaseCtx.phase === 'BATTLE') triggerDesc = 'Battle Phase has started';
+      else if (phaseCtx.phase === 'MAIN2') triggerDesc = 'Main Phase 2 has started';
+      else triggerDesc = 'a phase change occurred';
+    }
 
     const chainInfo = chainStack.length > 0
-      ? `<p style="color:var(--text-muted);font-size:0.7rem;margin-bottom:8px">Chain: ${chainStack.map(c => c.card.name).join(' → ')}</p>`
+      ? `<div style="display:flex;align-items:center;gap:6px;margin-bottom:10px;flex-wrap:wrap;justify-content:center">
+          <span style="color:var(--text-muted);font-size:0.7rem">Chain:</span>
+          ${chainStack.map(c => `
+            <div style="display:flex;flex-direction:column;align-items:center;gap:2px">
+              <img src="./output-web/${c.card.cardId}.webp" alt="${c.card.name}"
+                   class="popup-card-thumb" data-card-id="${c.card.cardId}"
+                   style="width:40px;height:56px;object-fit:cover;border-radius:4px;border:1px solid var(--gold)" />
+              <span style="font-size:0.55rem;color:var(--text-secondary);max-width:50px;text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${c.card.name}</span>
+            </div>
+          `).join('<span style="color:var(--gold);font-size:0.7rem">→</span>')}
+        </div>`
       : '';
 
     // Build attack context info showing attacker and target
@@ -1715,6 +2066,8 @@ export class GameUI {
       btn.onclick = (e) => {
         e.stopPropagation();
         overlay.remove();
+        // Chain flash visual
+        this._triggerChainFlash();
         callback({ activate: true, cardInstanceId: btn.dataset.instance });
       };
     });
@@ -1726,6 +2079,9 @@ export class GameUI {
         this._showCardZoom(btn.dataset.cardId);
       };
     });
+
+    // Hover-to-zoom on card images in the response dialog
+    this._attachPopupHoverZoom(overlay);
   }
 
   // ─── Preview & Toast ──────────────────────────────────────
@@ -1754,6 +2110,93 @@ export class GameUI {
     const drewCards = newSize > prevSize && prevSize > 0;
     const cardsDrawn = drewCards ? newSize - prevSize : 0;
 
+    // ─── Detect LP changes (screen shake + damage flash) ───
+    for (const p of gs.players) {
+      const prevLP = this._lastLP[p.id];
+      if (prevLP !== undefined && p.lp < prevLP) {
+        const dmg = prevLP - p.lp;
+        // Screen shake for any LP damage
+        this._triggerScreenShake();
+        // Schedule floating number on the LP bar after render
+        setTimeout(() => {
+          const lpEl = document.getElementById(`lp-${p.id}`);
+          if (lpEl) {
+            const rect = lpEl.getBoundingClientRect();
+            this.showFloatingNumber(rect.left + rect.width / 2, rect.top, `-${dmg}`, 'damage');
+          }
+        }, 50);
+      } else if (prevLP !== undefined && p.lp > prevLP) {
+        const heal = p.lp - prevLP;
+        setTimeout(() => {
+          const lpEl = document.getElementById(`lp-${p.id}`);
+          if (lpEl) {
+            const rect = lpEl.getBoundingClientRect();
+            this.showFloatingNumber(rect.left + rect.width / 2, rect.top, `+${heal}`, 'heal');
+          }
+        }, 50);
+      }
+    }
+
+    // ─── Detect unit destruction (particles) ───
+    for (const p of gs.players) {
+      const prevUnits = this._lastFieldUnits[p.id] || [];
+      const currentUnits = p.getFieldUnits().map(u => u.instanceId);
+      const destroyed = prevUnits.filter(id => !currentUnits.includes(id));
+      if (destroyed.length > 0) {
+        // Schedule particles after render for each destroyed unit
+        for (const instanceId of destroyed) {
+          setTimeout(() => this._spawnDestructionParticles(instanceId), 100);
+        }
+      }
+    }
+
+    // ─── Detect spell/trap flip (card flip animation) ───
+    for (const p of gs.players) {
+      const prevST = this._lastFieldSpellTraps[p.id] || {};
+      for (const card of p.spellTrapZone) {
+        if (card && card.faceUp && prevST[card.instanceId] === false) {
+          // This card was just flipped face-up
+          setTimeout(() => {
+            const el = document.querySelector(`.game-card[data-instance="${card.instanceId}"]`);
+            if (el) {
+              el.classList.add('card-flipping');
+              // Also add spell flash if it's a spell
+              if (card.type === 'Spell') {
+                el.classList.add('spell-activating');
+              }
+              setTimeout(() => {
+                el.classList.remove('card-flipping', 'spell-activating');
+              }, 600);
+            }
+          }, 50);
+        }
+      }
+    }
+
+    // ─── Detect mana changes (crystal animation) ───
+    for (const p of gs.players) {
+      const prevMana = this._lastMana[p.id];
+      if (prevMana !== undefined && p.mana !== prevMana) {
+        const diff = p.mana - prevMana;
+        setTimeout(() => {
+          const manaEl = document.querySelector(`.player-bar[data-player="${p.id}"] .mana-display`);
+          if (manaEl) {
+            this._showManaCrystal(manaEl, diff);
+          }
+        }, 50);
+      }
+    }
+
+    // ─── Detect unit damage flash (units that took damage but survived) ───
+    for (const p of gs.players) {
+      for (const unit of p.getFieldUnits()) {
+        const prevDmg = (this._lastUnitDamage[unit.instanceId] || 0);
+        if (unit.damageTaken > prevDmg) {
+          setTimeout(() => this._triggerDamageFlash(unit.instanceId), 80);
+        }
+      }
+    }
+
     // Check if we have a pending play animation
     const playAnim = this._pendingPlayAnim;
     this._pendingPlayAnim = null;
@@ -1768,9 +2211,22 @@ export class GameUI {
 
     // Draw animation removed per user request
 
-    // Track hand sizes for all players
+    // Track state for all players
     for (const p of gs.players) {
       this._lastHandSizes[p.id] = p.hand.length;
+      this._lastLP[p.id] = p.lp;
+      this._lastFieldUnits[p.id] = p.getFieldUnits().map(u => u.instanceId);
+      this._lastMana[p.id] = p.mana;
+      // Track unit damage for flash animation
+      for (const unit of p.getFieldUnits()) {
+        this._lastUnitDamage[unit.instanceId] = unit.damageTaken;
+      }
+      // Track spell/trap face-up state
+      const stState = {};
+      for (const card of p.spellTrapZone) {
+        if (card) stState[card.instanceId] = card.faceUp;
+      }
+      this._lastFieldSpellTraps[p.id] = stState;
     }
   }
 
@@ -2051,7 +2507,7 @@ export class GameUI {
     setTimeout(() => {
       overlay.classList.add('attack-anim-fade');
       setTimeout(() => overlay.remove(), 400);
-    }, 800);
+    }, 1800);
   }
 
   _showGraveyardViewer(player) {
@@ -2115,11 +2571,11 @@ export class GameUI {
       background:rgba(30,30,40,0.95);color:var(--text-primary);
       padding:10px 24px;border-radius:8px;font-size:0.8rem;
       border:1px solid var(--glass-border);z-index:100;
-      animation:float-up 2s ease-out forwards;
+      animation:float-up 4s ease-out forwards;
     `;
     toast.textContent = message;
     this.app.appendChild(toast);
-    setTimeout(() => toast.remove(), 2000);
+    setTimeout(() => toast.remove(), 4000);
   }
 
   // ─── Animations ───────────────────────────────────────────
@@ -2153,20 +2609,37 @@ export class GameUI {
       return;
     }
 
+    const isAI = gs.gameMode === 'ai';
+    const playerWon = winner && winner.id === 0;
+    const titleText = isAI ? (playerWon ? 'Victory!' : 'Defeat!') : 'Victory!';
+    const subtitleText = isAI
+      ? (playerWon ? 'You won the battle!' : 'AI Opponent defeated you.')
+      : (winner ? `${winner.name} wins the battle!` : 'Draw!');
+    const isDefeat = isAI && !playerWon;
+
     this.app.innerHTML = `
-      <div class="game-over">
+      <div class="game-over ${isDefeat ? 'defeat' : ''}">
         <button class="global-menu-btn" id="btn-menu">☰ Menu</button>
-        <h1>Victory!</h1>
-        <h2>${winner ? `${winner.name} wins the battle!` : 'Draw!'}</h2>
+        ${isDefeat ? '<div class="defeat-vignette"></div>' : ''}
+        ${!isDefeat ? '<div class="victory-particles" id="victory-particles"></div>' : ''}
+        <h1>${titleText}</h1>
+        <h2>${subtitleText}</h2>
         <button class="menu-btn primary" id="btn-rematch" style="position:relative;z-index:1">Play Again</button>
       </div>
     `;
     this._wireGlobalMenuButton();
 
+    // Spawn victory particles
+    if (!isDefeat) {
+      this._spawnVictoryParticles();
+    }
+
     document.getElementById('btn-rematch').onclick = () => {
       this.playerConfigs = [];
       this.selectedCard = null;
       this.attackingUnit = null;
+      this.ai = null;
+      this._aiTurnInProgress = false;
       this.showMenu();
     };
   }
@@ -2199,5 +2672,251 @@ export class GameUI {
   _getRegionClass(region) {
     const map = { Northern: 'north', Eastern: 'east', Southern: 'south', Western: 'west' };
     return map[region] || '';
+  }
+
+  // ─── Visual Effect Helpers ──────────────────────────────────
+
+  _triggerScreenShake() {
+    this.app.classList.remove('screen-shake');
+    // Force reflow to restart animation
+    void this.app.offsetWidth;
+    this.app.classList.add('screen-shake');
+    setTimeout(() => this.app.classList.remove('screen-shake'), 350);
+  }
+
+  _spawnDestructionParticles(instanceId) {
+    // Try to find the card element; if destroyed, use last known position or center
+    const el = document.querySelector(`.game-card[data-instance="${instanceId}"]`)
+      || document.querySelector(`.card-slot[data-instance="${instanceId}"]`);
+    let cx, cy;
+    if (el) {
+      const rect = el.getBoundingClientRect();
+      cx = rect.left + rect.width / 2;
+      cy = rect.top + rect.height / 2;
+    } else {
+      // Fallback: center of screen
+      cx = window.innerWidth / 2;
+      cy = window.innerHeight / 2;
+    }
+
+    const colors = ['fire', 'gold', 'white'];
+    for (let i = 0; i < 12; i++) {
+      const particle = document.createElement('div');
+      const color = colors[Math.floor(Math.random() * colors.length)];
+      particle.className = `destruction-particle ${color}`;
+      particle.style.position = 'fixed';
+      particle.style.left = `${cx}px`;
+      particle.style.top = `${cy}px`;
+      const angle = (Math.PI * 2 / 12) * i + (Math.random() - 0.5);
+      const dist = 40 + Math.random() * 80;
+      particle.style.setProperty('--px', `${Math.cos(angle) * dist}px`);
+      particle.style.setProperty('--py', `${Math.sin(angle) * dist}px`);
+      document.body.appendChild(particle);
+      setTimeout(() => particle.remove(), 800);
+    }
+  }
+
+  _showTurnBanner(title, subtitle) {
+    const banner = document.createElement('div');
+    banner.className = 'turn-banner';
+    banner.innerHTML = `
+      <div class="turn-banner-content">
+        <div class="turn-banner-line"></div>
+        <h2>${title}</h2>
+        <p>${subtitle}</p>
+        <div class="turn-banner-line"></div>
+      </div>
+    `;
+    document.body.appendChild(banner);
+    setTimeout(() => banner.remove(), 1700);
+  }
+
+  _showManaCrystal(parentEl, diff) {
+    if (!parentEl) return;
+    const rect = parentEl.getBoundingClientRect();
+    const crystal = document.createElement('div');
+    crystal.className = 'mana-crystal-float';
+    crystal.textContent = diff > 0 ? `+${diff} 💎` : `${diff} 💎`;
+    crystal.style.color = diff > 0 ? 'var(--mana-blue)' : 'var(--lp-red)';
+    crystal.style.position = 'fixed';
+    crystal.style.left = `${rect.left + rect.width / 2}px`;
+    crystal.style.top = `${rect.top}px`;
+    document.body.appendChild(crystal);
+    setTimeout(() => crystal.remove(), 1000);
+  }
+
+  _triggerChainFlash() {
+    const flash = document.createElement('div');
+    flash.className = 'chain-flash';
+    document.body.appendChild(flash);
+    setTimeout(() => flash.remove(), 250);
+  }
+
+  _spawnVictoryParticles() {
+    const container = document.getElementById('victory-particles');
+    if (!container) return;
+    const colors = ['#ffd54f', '#ffb74d', '#fff8e1', '#4fc3f7', '#66bb6a', '#ba68c8'];
+    for (let i = 0; i < 40; i++) {
+      const p = document.createElement('div');
+      p.className = 'victory-particle';
+      p.style.left = `${Math.random() * 100}%`;
+      p.style.top = `-10px`;
+      p.style.background = colors[Math.floor(Math.random() * colors.length)];
+      p.style.width = `${3 + Math.random() * 5}px`;
+      p.style.height = p.style.width;
+      p.style.animationDuration = `${2 + Math.random() * 3}s`;
+      p.style.animationDelay = `${Math.random() * 2}s`;
+      container.appendChild(p);
+    }
+  }
+
+  _spawnFieldParticles() {
+    // Only create once per render cycle
+    if (this._fieldParticlesCreated) return;
+    this._fieldParticlesCreated = true;
+
+    const container = document.createElement('div');
+    container.className = 'field-particles';
+    for (let i = 0; i < 15; i++) {
+      const p = document.createElement('div');
+      p.className = 'field-particle';
+      p.style.left = `${Math.random() * 100}%`;
+      p.style.bottom = `${Math.random() * 30}%`;
+      p.style.animationDuration = `${8 + Math.random() * 12}s`;
+      p.style.animationDelay = `${Math.random() * 10}s`;
+      p.style.opacity = `${0.1 + Math.random() * 0.2}`;
+      container.appendChild(p);
+    }
+    this.app.style.position = 'relative';
+    this.app.appendChild(container);
+
+    // Reset flag when field particles are removed (next render)
+    setTimeout(() => { this._fieldParticlesCreated = false; }, 100);
+  }
+
+  _showKeywordBurst(instanceId, keyword) {
+    const el = document.querySelector(`.game-card[data-instance="${instanceId}"]`);
+    if (!el) return;
+    el.style.position = 'relative';
+    const burst = document.createElement('div');
+    const kwLower = keyword.toLowerCase();
+    burst.className = `keyword-burst ${kwLower}`;
+    burst.textContent = keyword;
+    el.appendChild(burst);
+    setTimeout(() => burst.remove(), 900);
+  }
+
+  _showSummonCircle(slotEl) {
+    if (!slotEl) return;
+    slotEl.style.position = 'relative';
+    const circle = document.createElement('div');
+    circle.className = 'summon-circle';
+    slotEl.appendChild(circle);
+    setTimeout(() => circle.remove(), 600);
+  }
+
+  _triggerDamageFlash(instanceId) {
+    const el = document.querySelector(`.game-card[data-instance="${instanceId}"]`);
+    if (!el) return;
+    el.classList.add('damage-flash');
+    setTimeout(() => el.classList.remove('damage-flash'), 350);
+  }
+
+  /**
+   * Attach hover-to-zoom behavior on card images inside popup dialogs.
+   * Shows a larger preview next to the cursor when hovering .popup-card-thumb or .response-card-img
+   */
+  _attachPopupHoverZoom(container) {
+    const imgs = container.querySelectorAll('.popup-card-thumb, .response-card-img');
+    let preview = null;
+
+    imgs.forEach(img => {
+      img.style.cursor = 'pointer';
+
+      img.addEventListener('mouseenter', (e) => {
+        const cardId = img.dataset.cardId || img.alt;
+        const src = img.src;
+        if (!src) return;
+
+        preview = document.createElement('div');
+        preview.className = 'popup-hover-preview';
+        preview.innerHTML = `<img src="${src}" alt="${cardId}" style="width:200px;height:auto;border-radius:var(--radius-card);box-shadow:0 8px 32px rgba(0,0,0,0.8),0 0 30px rgba(255,213,79,0.15)" />`;
+        preview.style.cssText = 'position:fixed;z-index:9999;pointer-events:none;';
+        document.body.appendChild(preview);
+
+        // Position the preview
+        const rect = img.getBoundingClientRect();
+        const previewW = 210;
+        let left = rect.right + 12;
+        if (left + previewW > window.innerWidth) {
+          left = rect.left - previewW - 12;
+        }
+        let top = rect.top;
+        if (top + 300 > window.innerHeight) {
+          top = window.innerHeight - 310;
+        }
+        preview.style.left = `${left}px`;
+        preview.style.top = `${top}px`;
+      });
+
+      img.addEventListener('mouseleave', () => {
+        if (preview) {
+          preview.remove();
+          preview = null;
+        }
+      });
+    });
+  }
+
+  /**
+   * Hand-based card selection: highlights valid cards in hand and lets player click them.
+   * Used when an effect requires choosing from cards in the player's own hand.
+   */
+  _showHandSelection(targets, description, callback) {
+    // Build a set of valid instance IDs
+    const validIds = new Set(targets.map(t => t.instanceId || t.card?.instanceId));
+
+    // Show instruction banner
+    const banner = document.createElement('div');
+    banner.className = 'hand-select-banner';
+    banner.innerHTML = `
+      <div class="hand-select-content">
+        <span>${description}</span>
+        <button class="menu-btn hand-select-cancel">✕ Cancel</button>
+      </div>
+    `;
+    document.body.appendChild(banner);
+
+    // Highlight valid hand cards
+    const handCards = document.querySelectorAll('.hand-card.game-card');
+    const cleanup = () => {
+      banner.remove();
+      handCards.forEach(c => {
+        c.classList.remove('hand-selectable');
+        c.removeEventListener('click', c._handSelectHandler);
+        delete c._handSelectHandler;
+      });
+    };
+
+    handCards.forEach(cardEl => {
+      const instanceId = cardEl.dataset.instance;
+      if (validIds.has(instanceId)) {
+        cardEl.classList.add('hand-selectable');
+        const handler = (e) => {
+          e.stopPropagation();
+          cleanup();
+          const target = targets.find(t => (t.instanceId || t.card?.instanceId) === instanceId);
+          callback(target);
+        };
+        cardEl._handSelectHandler = handler;
+        cardEl.addEventListener('click', handler);
+      }
+    });
+
+    // Cancel button
+    banner.querySelector('.hand-select-cancel').onclick = () => {
+      cleanup();
+      callback(null);
+    };
   }
 }

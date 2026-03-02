@@ -94,6 +94,8 @@ export class GameState {
 
         this.gameMode = options.gameMode || 'duel';
         const startingLP = options.startingLP || 3000;
+        this.startingLP = startingLP;
+        this.hasBattledThisTurn = false;
         this.players.forEach(p => p.lp = startingLP);
 
         // Determine starting player (random)

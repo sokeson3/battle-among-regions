@@ -52,6 +52,19 @@ export class ActionValidator {
             return { valid: false, reason: `Not enough mana. Need ${cardInstance.manaCost}, have ${player.getTotalMana()}.` };
         }
 
+        // Check if the spell requires targets and any valid targets exist
+        if (this.effectEngine) {
+            const effects = this.effectEngine.getEffects(cardInstance.cardId);
+            for (const effect of effects) {
+                if ((effect.trigger === 'SELF' || effect.trigger === 'ON_SPELL_ACTIVATE') && effect.requiresTarget && effect.targets) {
+                    const validTargets = effect.targets(gs, { source: cardInstance, sourcePlayer: player });
+                    if (validTargets.length === 0) {
+                        return { valid: false, reason: 'No valid targets.' };
+                    }
+                }
+            }
+        }
+
         return { valid: true };
     }
 
@@ -122,6 +135,9 @@ export class ActionValidator {
         if (unitInstance.summonedThisTurn && !unitInstance.keywords.includes('RUSH')) {
             return { valid: false, reason: 'Unit cannot attack the turn it was summoned (no Rush).' };
         }
+        if (unitInstance.hasChangedPositionThisTurn) {
+            return { valid: false, reason: 'Unit cannot attack after changing position this turn.' };
+        }
 
         return { valid: true };
     }
@@ -141,6 +157,19 @@ export class ActionValidator {
         // Check if card has an activatable effect
         if (!cardInstance.effectTriggers.includes('ACTIVATED')) return { valid: false, reason: 'No activated ability.' };
 
+        // Check if the effect requires targets and any valid targets exist
+        if (this.effectEngine) {
+            const effects = this.effectEngine.getEffects(cardInstance.cardId);
+            for (const effect of effects) {
+                if (effect.trigger === 'ACTIVATED' && effect.requiresTarget && effect.targets) {
+                    const validTargets = effect.targets(this.gameState, { source: cardInstance, sourcePlayer: player });
+                    if (validTargets.length === 0) {
+                        return { valid: false, reason: 'No valid targets.' };
+                    }
+                }
+            }
+        }
+
         return { valid: true };
     }
 
@@ -151,6 +180,8 @@ export class ActionValidator {
         const gs = this.gameState;
         const player = gs.getPlayerById(playerId);
         if (!player) return { valid: false, reason: 'Invalid player.' };
+        if (!gs.isPlayersTurn(playerId)) return { valid: false, reason: 'Not your turn.' };
+        if (gs.phase !== PHASES.MAIN1 && gs.phase !== PHASES.MAIN2) return { valid: false, reason: 'Can only activate during Main Phase.' };
         if (cardInstance.type !== 'Spell') return { valid: false, reason: 'Card is not a Spell.' };
         if (cardInstance.faceUp) return { valid: false, reason: 'Card is already face-up.' };
         if (cardInstance.setThisTurn) return { valid: false, reason: 'Cannot activate a card the same turn it was set.' };
@@ -158,6 +189,19 @@ export class ActionValidator {
         // Pay mana cost when activating
         if (!this.manaSystem.canAfford(playerId, cardInstance.manaCost, true)) {
             return { valid: false, reason: `Not enough mana to activate. Need ${cardInstance.manaCost}.` };
+        }
+
+        // Check if the spell requires targets and any valid targets exist
+        if (this.effectEngine) {
+            const effects = this.effectEngine.getEffects(cardInstance.cardId);
+            for (const effect of effects) {
+                if ((effect.trigger === 'SELF' || effect.trigger === 'ON_SPELL_ACTIVATE') && effect.requiresTarget && effect.targets) {
+                    const validTargets = effect.targets(gs, { source: cardInstance, sourcePlayer: player });
+                    if (validTargets.length === 0) {
+                        return { valid: false, reason: 'No valid targets.' };
+                    }
+                }
+            }
         }
 
         return { valid: true };
@@ -196,12 +240,35 @@ export class ActionValidator {
 
         // If we have an effect engine and trigger context, check if the trap's effect conditions are met
         if (options.effectEngine && options.triggerContext) {
-            const { effectEngine, triggerContext } = options;
+            const { effectEngine, triggerContext, triggerType } = options;
             const effects = effectEngine.getEffects(cardInstance.cardId);
             if (effects.length > 0) {
-                // Check if at least one effect's condition is satisfied
+                // Map dialog triggerType to matching effect trigger events
+                const triggerTypeToEvents = {
+                    'attack': ['ON_ATTACK_DECLARE', 'ON_FRIENDLY_TARGETED'],
+                    'summon': ['ON_OPPONENT_SUMMON'],
+                    'spell': ['ON_SPELL_ACTIVATE'],
+                    'phase_change': ['ON_PHASE_CHANGE', 'ON_BATTLE_PHASE_START'],
+                    'set': [],
+                    'destroy': ['ON_FRIENDLY_DESTROY', 'ON_DESTROY'],
+                    'ability': [],
+                };
+                const allowedTriggers = triggerType ? (triggerTypeToEvents[triggerType] || []) : [];
+
+                // Check if at least one effect has a matching trigger AND condition
                 const hasMatchingCondition = effects.some(effect => {
-                    // If the effect has no condition, it's always valid
+                    // SELF-trigger traps don't activate from the response dialog
+                    if (effect.trigger === 'SELF') return false;
+
+                    // The effect's trigger must match the current trigger type
+                    if (triggerType && allowedTriggers.length > 0) {
+                        if (!allowedTriggers.includes(effect.trigger)) return false;
+                    } else if (triggerType && allowedTriggers.length === 0) {
+                        // Known trigger type with no matching events — skip
+                        return false;
+                    }
+
+                    // If the effect has no condition, it's valid (trigger matched)
                     if (!effect.condition) return true;
                     // Check the condition with current context
                     try {

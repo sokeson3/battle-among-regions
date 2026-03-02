@@ -19,20 +19,67 @@ export function register(effectEngine, cardDB) {
             condition: (gs, ctx) => {
                 const owner = gs.players.find(p => p.landmarkZone?.cardId === 'E002');
                 if (!owner) return false;
-                // Must have a Spell or Trap in hand to reveal
-                return owner.hand.some(c => c.type === 'Spell' || c.type === 'Trap');
+                // Only react to OPPONENT spells, not the owner's own
+                if (!ctx.caster || ctx.caster.id === owner.id) return false;
+                if (owner.landmarkZone._scrollLibraryUsed) return false;
+                // Must have a Spell or Trap in hand to reveal AND 2 mana to pay
+                return owner.hand.some(c => c.type === 'Spell' || c.type === 'Trap') &&
+                    (owner.primaryMana + owner.spellMana) >= 2;
             },
             isOptional: true,
             execute: async (gs, ctx, ee) => {
                 const owner = gs.players.find(p => p.landmarkZone?.cardId === 'E002');
-                if (!owner || owner.primaryMana + owner.spellMana < 2) return;
+                if (!owner) return;
 
                 const choice = await ee.requestChoice(
                     [{ label: 'Negate the Spell', value: 'negate' }, { label: 'Copy the effect', value: 'copy' }, { label: 'Pass', value: 'pass' }],
                     `Scroll Library: React to ${ctx.spell?.name || 'Spell'}?`
                 );
-                if (choice?.value === 'pass') return;
-                gs.log('LANDMARK', `Scroll Library activates! (${choice?.value})`);
+                if (!choice || choice.value === 'pass') return;
+
+                // Reveal a Spell/Trap from hand, shuffle it into deck
+                const revealable = owner.hand.filter(c => c.type === 'Spell' || c.type === 'Trap');
+                const revealed = await ee.requestChoice(
+                    revealable.map(c => ({ label: `${c.name} (${c.type})`, value: c.instanceId, cardId: c.cardId })),
+                    'Choose a Spell/Trap to reveal and shuffle into your deck'
+                );
+                if (!revealed) return;
+
+                const revIdx = owner.hand.findIndex(c => c.instanceId === revealed.value);
+                if (revIdx >= 0) {
+                    const card = owner.hand.splice(revIdx, 1)[0];
+                    owner.deck.push(card);
+                    ee.shuffleDeck(owner.id);
+                    gs.log('EFFECT', `${owner.name} reveals ${card.name} and shuffles it into the deck.`);
+                }
+
+                // Pay 2 mana
+                const fromSpell = Math.min(2, owner.spellMana);
+                owner.spellMana -= fromSpell;
+                if (fromSpell < 2) owner.primaryMana -= (2 - fromSpell);
+
+                // Mark as used this round
+                owner.landmarkZone._scrollLibraryUsed = true;
+
+                gs.log('LANDMARK', `Scroll Library activates! (${choice.value})`);
+
+                if (choice.value === 'negate') {
+                    // Set negation flag — spell execution will be skipped
+                    if (gs.battleState) {
+                        gs.battleState.spellNegated = true;
+                    }
+                    gs._scrollLibraryNegate = true;
+                    gs.log('EFFECT', `Scroll Library negates ${ctx.spell?.name || 'the Spell'}!`);
+                } else if (choice.value === 'copy') {
+                    // Copy the spell's effect to the Scroll Library owner
+                    const spellEffects = ee.getEffects(ctx.spell?.cardId);
+                    for (const eff of spellEffects) {
+                        if (eff.trigger === 'SELF' || eff.trigger === EFFECT_EVENTS.ON_SPELL_ACTIVATE) {
+                            await ee._resolveEffect(eff, { source: ctx.spell, sourcePlayer: owner });
+                        }
+                    }
+                    gs.log('EFFECT', `Scroll Library copies ${ctx.spell?.name || 'the Spell'}'s effect!`);
+                }
             },
         }),
     ]);
@@ -337,10 +384,35 @@ export function register(effectEngine, cardDB) {
             trigger: 'SELF',
             description: 'Look at top 3 cards and reorder',
             execute: async (gs, ctx, ee) => {
-                const top3 = ctx.sourcePlayer.deck.slice(0, 3);
-                gs.log('EFFECT', `Top 3 cards: ${top3.map(c => c.name).join(', ')}`);
-                // In a full implementation, player would reorder these
-                // For now, we just show them
+                const top3 = ctx.sourcePlayer.deck.splice(0, Math.min(3, ctx.sourcePlayer.deck.length));
+                if (top3.length === 0) return;
+                gs.log('EFFECT', `Top ${top3.length} cards: ${top3.map(c => c.name).join(', ')}`);
+
+                // Let the player reorder by picking cards one at a time
+                const reordered = [];
+                let remaining = [...top3];
+                for (let i = 0; i < top3.length; i++) {
+                    if (remaining.length === 1) {
+                        reordered.push(remaining[0]);
+                        break;
+                    }
+                    const chosen = await ee.requestChoice(
+                        remaining.map(c => ({ label: c.name, value: c.instanceId, cardId: c.cardId })),
+                        `Choose card for position ${i + 1} (top of deck)`
+                    );
+                    if (chosen) {
+                        const card = remaining.find(c => c.instanceId === chosen.value);
+                        reordered.push(card);
+                        remaining = remaining.filter(c => c.instanceId !== chosen.value);
+                    } else {
+                        // If cancelled, push remaining in current order
+                        reordered.push(...remaining);
+                        break;
+                    }
+                }
+                // Place reordered cards back on top of deck
+                ctx.sourcePlayer.deck.unshift(...reordered);
+                gs.log('EFFECT', `Deck reordered: ${reordered.map(c => c.name).join(', ')}`);
             },
         }),
     ]);
@@ -398,7 +470,6 @@ export function register(effectEngine, cardDB) {
                 const dmg = ctx.sourcePlayer.spellsPlayedThisTurn > 1 ? 400 : 200;
                 if (ctx.target) {
                     ee.dealDamageToUnit(ctx.target, dmg, 'Redirect');
-                    if (ctx.target.damageTaken >= ctx.target.currentDEF) ee.destroyUnit(ctx.target);
                 }
             },
         }),
@@ -644,7 +715,7 @@ export function register(effectEngine, cardDB) {
             cardId: 'E040',
             trigger: EFFECT_EVENTS.ON_BATTLE_PHASE_START,
             description: 'Enemies cannot attack LP directly this turn',
-            condition: (gs, ctx) => ctx.activePlayer?.id !== ctx.sourcePlayer.id,
+            condition: (gs, ctx) => gs.getActivePlayer()?.id !== ctx.sourcePlayer.id,
             execute: (gs, ctx, ee) => {
                 gs.log('TRAP', 'Smoke Screen — no direct LP attacks this turn!');
                 // Set flag to prevent direct attacks
@@ -714,23 +785,29 @@ export function register(effectEngine, cardDB) {
     effectEngine.registerCardEffects('E044', [
         createEffect({
             cardId: 'E044',
-            trigger: EFFECT_EVENTS.ON_SPELL_ACTIVATE,
+            trigger: 'SELF',
             description: 'Opponent can only play 1 more card this turn',
-            condition: (gs, ctx) => ctx.caster?.id !== ctx.sourcePlayer.id,
             execute: (gs, ctx, ee) => {
-                gs.getActivePlayer()._timeDelayActive = true;
-                gs.log('TRAP', 'Time Delay Rune — opponent can only play 1 more card!');
+                const opponent = gs.getOpponent(ctx.sourcePlayer.id);
+                if (opponent) {
+                    opponent._timeDelayActive = true;
+                    gs.log('TRAP', 'Time Delay Rune — opponent can only play 1 more card!');
+                }
             },
         }),
     ]);
 
     // E045: Karma Cut — When enemy unit activates effect: destroy it
+    // Implementation: triggers on opponent summon for units with ON_SUMMON effects
     effectEngine.registerCardEffects('E045', [
         createEffect({
             cardId: 'E045',
-            trigger: EFFECT_EVENTS.ON_SUMMON,
+            trigger: EFFECT_EVENTS.ON_OPPONENT_SUMMON,
             description: 'Destroy unit that activated its effect',
-            condition: (gs, ctx) => ctx.summoningPlayer?.id !== ctx.sourcePlayer.id,
+            condition: (gs, ctx) => {
+                return ctx.summoningPlayer?.id !== ctx.sourcePlayer.id &&
+                    ctx.summonedCard?.effectTriggers?.includes('ON_SUMMON');
+            },
             execute: (gs, ctx, ee) => {
                 if (ctx.summonedCard && ctx.summonedCard.effectTriggers.includes('ON_SUMMON')) {
                     ee.destroyUnit(ctx.summonedCard);
@@ -762,8 +839,24 @@ export function register(effectEngine, cardDB) {
             cardId: 'E047',
             trigger: EFFECT_EVENTS.ON_ATTACK_DECLARE,
             description: 'Copy a Trap from graveyard',
-            execute: (gs, ctx, ee) => {
-                gs.log('TRAP', 'Chain Reaction activates!');
+            execute: async (gs, ctx, ee) => {
+                const graveyardTraps = ctx.sourcePlayer.graveyard.filter(c => c.type === 'Trap');
+                if (graveyardTraps.length === 0) {
+                    gs.log('TRAP', 'Chain Reaction: No Traps in graveyard!');
+                    return;
+                }
+                const chosen = await ee.requestChoice(
+                    graveyardTraps.map(c => ({ label: c.name, value: c.instanceId, cardId: c.cardId })),
+                    'Choose a Trap from your graveyard to copy'
+                );
+                if (chosen) {
+                    const trapCard = graveyardTraps.find(c => c.instanceId === chosen.value);
+                    const trapEffects = ee.getEffects(trapCard.cardId);
+                    gs.log('TRAP', `Chain Reaction copies ${trapCard.name}!`);
+                    for (const eff of trapEffects) {
+                        await ee._resolveEffect(eff, { ...ctx, source: trapCard, sourcePlayer: ctx.sourcePlayer });
+                    }
+                }
             },
         }),
     ]);

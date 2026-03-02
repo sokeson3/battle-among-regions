@@ -342,6 +342,202 @@ export class DeckBuilderUI {
     });
   }
 
+  /**
+   * Region-rotation draft: show one region's pool at a time.
+   * The player picks cards from the current region, confirms, and the remaining
+   * cards are "passed" while the next region's pool is received.
+   *
+   * @param {Object} opts
+   * @param {string}   opts.playerName
+   * @param {string}   opts.playerRegion
+   * @param {Object[]} opts.regionPool       - Cards available from the current region (with draftId)
+   * @param {string}   opts.regionName       - Name of the region being drafted from
+   * @param {number}   opts.passNumber       - Which pass this is (1-based)
+   * @param {number}   opts.totalPasses      - Total number of passes
+   * @param {number}   opts.currentDeckSize  - Cards already in the deck
+   * @param {number}   opts.targetDeckSize   - Final deck size target
+   * @param {string[]} opts.existingDeckCardIds - IDs of cards already in deck (for display)
+   * @param {number}   opts.minLandmarks     - Minimum landmarks required (0 = no minimum)
+   * @param {number}   opts.currentLandmarks - Landmarks already picked
+   * @returns {Promise<{picked: string[], remaining: Object[]}>} picked card IDs + remaining pool entries
+   */
+  showRegionRotationDraft(opts) {
+    const {
+      playerName,
+      playerRegion,
+      regionPool,
+      regionName,
+      passNumber,
+      totalPasses,
+      currentDeckSize,
+      targetDeckSize,
+      existingDeckCardIds = [],
+      minLandmarks = 0,
+      currentLandmarks = 0,
+    } = opts;
+
+    return new Promise(resolve => {
+      const selected = new Set();      // Set of draftIds
+      let showExistingDeck = false;
+
+      const render = () => {
+        const currentTotal = currentDeckSize + selected.size;
+        const remaining = targetDeckSize - currentTotal;
+        const canPickMore = remaining > 0;
+        const isOwnRegion = regionName === playerRegion;
+        const regionClass = this._getRegionClass(regionName);
+
+        // Count landmarks in the current selection
+        const selectedLandmarkCount = [...selected].filter(draftId => {
+          const card = regionPool.find(c => c.draftId === draftId);
+          return card && card.type === 'Landmark';
+        }).length;
+        const totalLandmarks = currentLandmarks + selectedLandmarkCount;
+        const needsMoreLandmarks = totalLandmarks < minLandmarks;
+
+        // Build existing deck section
+        let existingDeckHTML = '';
+        if (existingDeckCardIds.length > 0) {
+          const existingCards = existingDeckCardIds.map(id => {
+            const all = this.cardDb.getAllPlayableCards ? this.cardDb.getAllPlayableCards() : [];
+            return all.find(c => c.id === id);
+          }).filter(Boolean);
+
+          existingDeckHTML = `
+            <div class="existing-deck-section">
+              <h3 class="existing-deck-toggle" id="toggle-existing-deck" style="
+                color:var(--gold);margin:8px 0;font-family:Cinzel,serif;cursor:pointer;
+                display:flex;align-items:center;gap:8px;user-select:none;
+              ">
+                <span style="transition:transform 0.2s;display:inline-block;transform:rotate(${showExistingDeck ? '90deg' : '0deg'})">▶</span>
+                Cards Already in Deck (${existingDeckCardIds.length})
+              </h3>
+              ${showExistingDeck ? `
+                <div class="deck-builder-grid">
+                  ${existingCards.map(card => `
+                    <div class="draft-card existing-card" style="opacity:0.7;pointer-events:none;border-color:var(--gold)">
+                      <img class="draft-card-img" src="./output-web/${card.id}.webp" alt="${card.name}"
+                           onerror="this.style.display='none'" loading="lazy" />
+                      <div class="draft-card-info">
+                        <div class="draft-card-name">${card.name}</div>
+                        <div class="draft-card-type">${card.type}</div>
+                        <div class="draft-card-stats">
+                          ${card.type === 'Unit' ? `⚔${card.atk} ❤${card.hp}` : ''}
+                          💎${card.manaCost}
+                        </div>
+                      </div>
+                      <div class="draft-check" style="background:var(--gold);color:#000">★</div>
+                    </div>
+                  `).join('')}
+                </div>
+              ` : ''}
+            </div>
+          `;
+        }
+
+        this.container.innerHTML = `
+          <div class="deck-builder">
+            <div class="deck-builder-header">
+              <h2>${playerName}: Draft Cards</h2>
+              <div class="deck-builder-counter">
+                Deck: <span class="deck-count">${currentTotal}</span> / <span class="deck-target">${targetDeckSize}</span>
+                <span style="color:var(--text-muted);margin-left:12px">
+                  ${canPickMore ? `Pick cards from this region` : `Deck full!`}
+                </span>
+              </div>
+              <div style="margin-top:6px;font-size:0.9rem;">
+                <span class="draft-region-title ${regionClass}" style="text-transform:capitalize;font-weight:bold;">
+                  📦 Pass ${passNumber}: ${regionName}${isOwnRegion ? ' (Your Region)' : ''}
+                </span>
+              </div>
+              ${needsMoreLandmarks ? `
+                <div style="color:var(--gold);font-size:0.85rem;margin-top:4px">
+                  ⚠ You need at least ${minLandmarks} landmark(s) from your own region (have ${totalLandmarks})
+                </div>
+              ` : ''}
+            </div>
+
+            ${existingDeckHTML}
+
+            <div class="draft-region-section">
+              <h3 class="draft-region-title ${regionClass}" style="text-transform:capitalize">
+                ${regionName} — Available Cards (${regionPool.length})
+              </h3>
+              <div class="deck-builder-grid">
+                ${regionPool.map(card => {
+          const isSelected = selected.has(card.draftId);
+          const disabled = !isSelected && !canPickMore;
+          return `
+                    <div class="draft-card ${isSelected ? 'selected' : ''} ${disabled ? 'disabled' : ''} ${regionClass}"
+                         data-draft-id="${card.draftId}" data-card-id="${card.id}" data-region="${card.region}">
+                      <img class="draft-card-img" src="./output-web/${card.id}.webp" alt="${card.name}"
+                           onerror="this.style.display='none'" loading="lazy" />
+                      <div class="draft-card-info">
+                        <div class="draft-card-name">${card.name}</div>
+                        <div class="draft-card-type">${card.type}</div>
+                        <div class="draft-card-stats">
+                          ${card.type === 'Unit' ? `⚔${card.atk} ❤${card.hp}` : ''}
+                          💎${card.manaCost}
+                        </div>
+                      </div>
+                      ${isSelected ? '<div class="draft-check">✓</div>' : ''}
+                    </div>
+                  `;
+        }).join('')}
+              </div>
+            </div>
+
+            <div class="deck-builder-actions">
+              <button class="menu-btn primary" id="btn-confirm-pass">
+                Confirm & Pass Remaining (${selected.size} picked)
+              </button>
+            </div>
+          </div>
+        `;
+
+        // Wire card clicks
+        this.container.querySelectorAll('.draft-card:not(.disabled):not(.existing-card)').forEach(el => {
+          el.onclick = () => {
+            const draftId = el.dataset.draftId;
+            if (selected.has(draftId)) {
+              selected.delete(draftId);
+            } else if (canPickMore) {
+              selected.add(draftId);
+            }
+            render();
+          };
+        });
+
+        // Wire existing deck toggle
+        const toggleBtn = this.container.querySelector('#toggle-existing-deck');
+        if (toggleBtn) {
+          toggleBtn.onclick = () => {
+            showExistingDeck = !showExistingDeck;
+            render();
+          };
+        }
+
+        // Confirm / Pass button
+        const btn = this.container.querySelector('#btn-confirm-pass');
+        if (btn) {
+          btn.onclick = () => {
+            const pickedIds = [...selected].map(draftId => {
+              const card = regionPool.find(c => c.draftId === draftId);
+              return card ? card.id : null;
+            }).filter(Boolean);
+
+            // Remaining pool entries (not picked)
+            const remainingPool = regionPool.filter(c => !selected.has(c.draftId));
+
+            resolve({ picked: pickedIds, remaining: remainingPool });
+          };
+        }
+      };
+
+      render();
+    });
+  }
+
   _getRegionClass(region) {
     const map = { Northern: 'north', Eastern: 'east', Southern: 'south', Western: 'west' };
     return map[region] || '';

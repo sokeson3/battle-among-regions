@@ -22,6 +22,7 @@ export class CombatEngine {
         if (unit.position !== 'ATK') return false;
         if (unit.hasAttackedThisTurn && unit.attackCount >= unit.maxAttacks) return false;
         if (unit.summonedThisTurn && !unit.keywords.includes('RUSH')) return false;
+        if (unit.hasChangedPositionThisTurn) return false;
         return true;
     }
 
@@ -33,6 +34,9 @@ export class CombatEngine {
         const opponents = this.gameState.getOpponents(attackerOwnerId);
 
         for (const opponent of opponents) {
+            // E035: Seal Spell — sealed player is immune to attacks
+            if (opponent._sealActive) continue;
+
             const opponentUnits = opponent.getFieldUnits();
 
             if (opponentUnits.length === 0) {
@@ -57,6 +61,8 @@ export class CombatEngine {
     canTarget(attacker, target) {
         if (target.type === 'direct') {
             const opponent = target.player;
+            // E035: Seal Spell — sealed player is immune
+            if (opponent._sealActive) return false;
             const opponentUnits = opponent.getFieldUnits();
 
             if (opponentUnits.length === 0) return true;
@@ -70,8 +76,11 @@ export class CombatEngine {
         }
 
         if (target.type === 'unit') {
-            // Check for taunt-like effects (Jarl N021, Guardian Golem W020)
             const opponent = target.player;
+            // E035: Seal Spell — sealed player's units can't be attacked
+            if (opponent._sealActive) return false;
+
+            // Check for taunt-like effects (Jarl N021, Guardian Golem W020)
             const opponentUnits = opponent.getFieldUnits();
 
             for (const u of opponentUnits) {
@@ -119,7 +128,8 @@ export class CombatEngine {
             return;
         }
 
-        // Apply defending player's Landmark effects
+        // Apply Landmark effects for both players
+        await this._applyAttackerLandmark(attacker, target);
         await this._applyDefenderLandmark(attacker, target);
 
         if (target.type === 'direct') {
@@ -220,14 +230,15 @@ export class CombatEngine {
         const defRemainingDEF = defender.currentDEF - defender.damageTaken;
 
         if (atkDmg < defRemainingDEF) {
-            // ATK is less than DEF — attacker owner takes rebound LP damage
+            // ATK is less than DEF — defender takes ATK as damage, attacker owner takes rebound LP damage
+            this.effectEngine.dealDamageToUnit(defender, atkDmg, attacker.name);
             const rebound = defRemainingDEF - atkDmg;
             this.gameState.log('COMBAT', `${attackerOwner.name} takes ${rebound} rebound damage!`);
             this.effectEngine.dealDamageToLP(attackerOwner.id, rebound, `rebound from ${defender.name}`);
-            // Defender does NOT take damage when attacker ATK < DEF
         } else {
-            // ATK >= DEF — deal damage to defender
-            this.effectEngine.dealDamageToUnit(defender, atkDmg, attacker.name);
+            // ATK >= DEF — deal damage capped at remaining DEF (excess handled by Pierce)
+            const cappedDmg = Math.min(atkDmg, defRemainingDEF);
+            this.effectEngine.dealDamageToUnit(defender, cappedDmg, attacker.name);
         }
 
         // Pierce: if ATK > remaining DEF, excess → opponent LP
@@ -284,24 +295,32 @@ export class CombatEngine {
 
     /**
      * Check Arena of Trials (S001) Landmark effect
+     * CSV: "When a southern unit in ATK position fights a non-southern unit in this region,
+     *       the non-southern unit is destroyed after damage calculation."
      */
     async _checkArenaOfTrials(attacker, defender, defenderOwner, defenderDestroyed) {
-        // S001: Arena of Trials — if Southern unit in ATK position fights a non-southern unit, destroy the non-southern unit
+        const attackerOwner = this.gameState.getPlayerById(attacker.ownerId);
+
+        // Case 1: Defender owns the Arena — defender's Southern ATK unit fights non-Southern attacker
         if (defenderOwner.landmarkZone?.cardId === 'S001' && !defenderOwner.landmarkZone.silenced) {
-            if (attacker.region !== 'Southern' && defender.region === 'Southern' && defender.position === 'ATK') {
-                if (!defenderDestroyed) {
-                    // Wait, the rule is: non-southern unit is destroyed after damage calculation
-                    // This happens after damage is calculated
-                }
-                // Actually — the landmark is the defender's, so if a non-southern unit attacks a southern unit in this region
-                // the non-southern unit is destroyed after damage calculation
-                // Let's reconsider: "When a southern unit in ATK position fights a non-southern unit in this region"
-                // If the defender owns the landmark and controls a southern unit in ATK...
-                // The attacker (non-southern) is destroyed after damage.
-                const attackerLocation = this.gameState.findCardOnField(attacker.instanceId);
-                if (attackerLocation && attacker.region !== 'Southern') {
+            if (defender.region === 'Southern' && defender.position === 'ATK' && attacker.region !== 'Southern') {
+                // Check if attacker is still on the field (may already be destroyed by combat)
+                const loc = this.gameState.findCardOnField(attacker.instanceId);
+                if (loc) {
                     this.gameState.log('LANDMARK', `Arena of Trials destroys ${attacker.name} after damage calculation!`);
                     await this.effectEngine.destroyUnit(attacker);
+                }
+            }
+        }
+
+        // Case 2: Attacker owns the Arena — attacker's Southern ATK unit fights non-Southern defender
+        if (attackerOwner.landmarkZone?.cardId === 'S001' && !attackerOwner.landmarkZone.silenced) {
+            if (attacker.region === 'Southern' && attacker.position === 'ATK' && defender.region !== 'Southern') {
+                // Check if defender is still on the field (may already be destroyed by combat)
+                const loc = this.gameState.findCardOnField(defender.instanceId);
+                if (loc) {
+                    this.gameState.log('LANDMARK', `Arena of Trials destroys ${defender.name} after damage calculation!`);
+                    await this.effectEngine.destroyUnit(defender);
                 }
             }
         }
@@ -313,20 +332,35 @@ export class CombatEngine {
     async _applyDefenderLandmark(attacker, target) {
         if (target.type !== 'unit') return;
         const defenderOwner = target.player;
+        const defender = target.card;
 
         if (!defenderOwner.landmarkZone || defenderOwner.landmarkZone.silenced) return;
 
         const landmark = defenderOwner.landmarkZone;
 
-        // N001: Frostfell Citadel — +200 DEF to units in defense position
-        // Now handled as a registered effect in NorthernEffects.js
-
-        // S002: Volcanic Forge — Southern units +200 ATK
+        // S002: Volcanic Forge — Southern units +200 ATK when fighting in this region
+        // Only buff the specific unit that is fighting
         if (landmark.cardId === 'S002') {
-            for (const unit of defenderOwner.getFieldUnits()) {
-                if (unit.region === 'Southern') {
-                    this.effectEngine.applyTempStatMod(unit, 200, 0, 'Volcanic Forge');
-                }
+            if (defender.region === 'Southern') {
+                this.effectEngine.applyTempStatMod(defender, 200, 0, 'Volcanic Forge');
+            }
+        }
+    }
+
+    /**
+     * Apply attacking player's Landmark effects during battle
+     */
+    async _applyAttackerLandmark(attacker, target) {
+        const attackerOwner = this.gameState.getPlayerById(attacker.ownerId);
+        if (!attackerOwner.landmarkZone || attackerOwner.landmarkZone.silenced) return;
+
+        const landmark = attackerOwner.landmarkZone;
+
+        // S002: Volcanic Forge — Southern units +200 ATK when fighting in this region
+        // Only buff the specific unit that is fighting
+        if (landmark.cardId === 'S002') {
+            if (attacker.region === 'Southern') {
+                this.effectEngine.applyTempStatMod(attacker, 200, 0, 'Volcanic Forge');
             }
         }
     }
