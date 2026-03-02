@@ -868,6 +868,19 @@ body {
   box-shadow: 0 0 15px rgba(239, 83, 80, 0.3);
 }
 
+/* Highlight follows the card when hovered/zoomed */
+.target-highlight .game-card {
+  outline: 3px solid #ffd700;
+  outline-offset: 2px;
+  box-shadow: 0 0 16px 4px rgba(255, 215, 0, 0.5);
+}
+
+.attack-highlight-source .game-card {
+  outline: 3px solid #ff6b6b;
+  outline-offset: 2px;
+  box-shadow: 0 0 16px 4px rgba(255, 107, 107, 0.5);
+}
+
 .card-slot.valid-placement {
   border-color: var(--gold) !important;
   box-shadow: 0 0 18px rgba(255, 213, 79, 0.35);

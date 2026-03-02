@@ -5,6 +5,7 @@
 import { PHASES } from '../engine/GameState.js';
 import { DuelDeckBuilderUI } from './DuelDeckBuilderUI.js';
 import { AIPlayer } from '../engine/AIPlayer.js';
+import * as SharedUI from './SharedUI.js';
 
 export class GameUI {
   /**
@@ -694,6 +695,9 @@ export class GameUI {
   // ─── Main Game Board Render ───────────────────────────────
 
   render() {
+    // Clean up any orphaned floating UI elements
+    document.querySelectorAll('.popup-hover-preview, .card-flying, .hand-select-banner, .turn-banner, .destruction-particle, .mana-crystal-float, .chain-flash').forEach(e => e.remove());
+
     const gs = this.controller.gameState;
     if (gs.gameOver) {
       this.showGameOver();
@@ -1321,22 +1325,11 @@ export class GameUI {
       };
     });
 
-    // Attack arrow: when attackingUnit is set, show SVG arrow from attacker to cursor
+    // Highlight valid attack targets when attackingUnit is set
     if (this.attackingUnit) {
-      this._createAttackArrow();
-      const arrowMoveHandler = (e) => {
-        const clientX = e.touches ? e.touches[0].clientX : e.clientX;
-        const clientY = e.touches ? e.touches[0].clientY : e.clientY;
-        this._updateAttackArrow(clientX, clientY);
-      };
-      document.addEventListener('mousemove', arrowMoveHandler);
-      document.addEventListener('touchmove', arrowMoveHandler);
-      this._attackArrowCleanup = () => {
-        document.removeEventListener('mousemove', arrowMoveHandler);
-        document.removeEventListener('touchmove', arrowMoveHandler);
-      };
+      this._highlightAttackTargets();
     } else {
-      this._removeAttackArrow();
+      this._removeAttackHighlights();
     }
 
     // Field slot clicks for placement
@@ -1447,7 +1440,7 @@ export class GameUI {
     if (btnCancelAction) btnCancelAction.onclick = () => {
       this.attackingUnit = null;
       this.pendingPlacement = null;
-      this._removeAttackArrow();
+      this._removeAttackHighlights();
       this.render();
     };
 
@@ -1608,50 +1601,7 @@ export class GameUI {
    * Show a floating action menu near a card (YGO-style)
    */
   _showCardActionMenu(rect, options, callback) {
-    // Remove any existing menu
-    document.querySelectorAll('.card-action-menu-overlay').forEach(e => e.remove());
-
-    const overlay = document.createElement('div');
-    overlay.className = 'card-action-menu-overlay';
-    overlay.style.cssText = 'position:fixed;inset:0;z-index:65;';
-
-    const menu = document.createElement('div');
-    menu.className = 'card-action-menu';
-    // Position the menu above the card
-    const menuX = Math.min(rect.left + rect.width / 2, window.innerWidth - 100);
-    const menuY = rect.top - 8;
-    menu.style.cssText = `
-            position:fixed;
-            left:${menuX}px;
-            top:${menuY}px;
-            transform:translate(-50%, -100%);
-            z-index:66;
-        `;
-
-    menu.innerHTML = options.map((opt, i) => `
-            <div class="card-action-option" data-idx="${i}">
-                <span class="card-action-icon">${opt.icon || ''}</span>
-                <span>${opt.label}</span>
-            </div>
-        `).join('');
-
-    overlay.appendChild(menu);
-    document.body.appendChild(overlay);
-
-    // Click on option
-    menu.querySelectorAll('.card-action-option').forEach(el => {
-      el.onclick = (e) => {
-        e.stopPropagation();
-        const idx = parseInt(el.dataset.idx);
-        overlay.remove();
-        callback(options[idx]);
-      };
-    });
-
-    // Click outside to cancel
-    overlay.onclick = (e) => {
-      if (e.target === overlay) overlay.remove();
-    };
+    SharedUI.showCardActionMenu(rect, options, callback);
   }
 
   /**
@@ -1798,7 +1748,7 @@ export class GameUI {
       const attackerUnit = activePlayer.getFieldUnits().find(u => u.instanceId === this.attackingUnit);
       const attackerInstanceId = this.attackingUnit;
       this.attackingUnit = null;
-      this._removeAttackArrow();
+      this._removeAttackHighlights();
       this._showAttackAnimation(attackerUnit, target, null);
       this.controller.declareAttack(gs.activePlayerIndex, attackerInstanceId, {
         type: 'unit',
@@ -2008,53 +1958,7 @@ export class GameUI {
   // ─── Choice Dialog ────────────────────────────────────────
 
   showChoiceDialog(options, description, callback) {
-    const overlay = document.createElement('div');
-    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:200;display:flex;align-items:center;justify-content:center';
-
-    overlay.innerHTML = `
-      <div class="choice-dialog">
-        <h3>${description}</h3>
-        <div class="choice-options" style="display:flex;flex-wrap:wrap;gap:10px;justify-content:center;max-width:600px">
-          ${options.map((opt, i) => {
-      // If the option has a cardId or value that looks like a card ID, show its image
-      const cardId = opt.cardId || (typeof opt.value === 'string' && opt.value.match(/^[A-Z]\d{3}$/) ? opt.value : null);
-      if (cardId) {
-        return `
-                <div class="choice-option" data-idx="${i}" style="display:flex;flex-direction:column;align-items:center;padding:8px;max-width:120px">
-                  <img src="./output-web/${cardId}.webp" alt="${opt.label}"
-                       class="popup-card-thumb" data-card-id="${cardId}"
-                       style="width:80px;height:112px;object-fit:contain;border-radius:6px;margin-bottom:6px;border:1px solid var(--glass-border)" />
-                  <span style="font-size:0.7rem;text-align:center">${opt.label}</span>
-                </div>
-              `;
-      }
-      return `<div class="choice-option" data-idx="${i}">${opt.label}</div>`;
-    }).join('')}
-        </div>
-      </div>
-    `;
-
-    this.app.appendChild(overlay);
-
-    // Click outside dialog to cancel
-    overlay.onclick = (e) => {
-      if (e.target === overlay) {
-        overlay.remove();
-        callback(options[0]);
-      }
-    };
-    overlay.querySelector('.choice-dialog').onclick = (e) => e.stopPropagation();
-
-    overlay.querySelectorAll('.choice-option').forEach(el => {
-      el.onclick = () => {
-        const idx = parseInt(el.dataset.idx);
-        overlay.remove();
-        callback(options[idx]);
-      };
-    });
-
-    // Hover-to-zoom on card images in the choice dialog
-    this._attachPopupHoverZoom(overlay);
+    SharedUI.showChoiceDialog(this.app, options, description, callback);
   }
 
   // ─── Opponent Response Dialog ────────────────────────────
@@ -2510,105 +2414,60 @@ export class GameUI {
    * Show card zoomed 200% to center of screen
    */
   _showCardZoom(cardId) {
-    if (!cardId) return;
-    // Remove existing zoom
-    document.querySelectorAll('.card-zoom-overlay').forEach(e => e.remove());
+    SharedUI.showCardZoom(cardId);
+  }
 
-    const imgPath = `./output-web/${cardId}.webp`;
-    const overlay = document.createElement('div');
-    overlay.className = 'card-zoom-overlay';
-    overlay.innerHTML = `
-      <div class="card-zoom-container">
-        <img src="${imgPath}" alt="Card" class="card-zoom-image" />
-      </div>
-    `;
+  // ─── Attack Target Highlights ──────────────────────────────
 
-    document.body.appendChild(overlay);
+  /**
+   * Highlight all valid attack targets on the field using the same gold
+   * outline + glow style used for spell/trap/effect target selection.
+   */
+  _highlightAttackTargets() {
+    this._removeAttackHighlights();
 
-    // Click outside the card to dismiss
-    overlay.onclick = (e) => {
-      if (!e.target.closest('.card-zoom-container')) {
-        overlay.remove();
+    const gs = this.controller.gameState;
+    const activePlayer = gs.getActivePlayer();
+    const attackerUnit = activePlayer.getFieldUnits().find(u => u.instanceId === this.attackingUnit);
+    if (!attackerUnit) return;
+
+    // Highlight the attacker card itself with a distinct style
+    const attackerEl = document.querySelector(`.card-slot[data-instance="${this.attackingUnit}"]`);
+    if (attackerEl) {
+      attackerEl.style.outline = '3px solid #ff6b6b';
+      attackerEl.style.outlineOffset = '2px';
+      attackerEl.style.boxShadow = '0 0 16px 4px rgba(255,107,107,0.5)';
+      attackerEl.style.zIndex = '160';
+      attackerEl.style.position = 'relative';
+      attackerEl.classList.add('attack-highlight-source');
+    }
+
+    // Find all valid targets and highlight them
+    const opponents = gs.getOpponents(activePlayer.id);
+    for (const opponent of opponents) {
+      if (opponent._sealActive) continue;
+      for (const unit of opponent.getFieldUnits()) {
+        if (this.controller.combatEngine.canTarget(attackerUnit, { type: 'unit', card: unit, player: opponent })) {
+          const slotEl = document.querySelector(`.card-slot[data-instance="${unit.instanceId}"]`);
+          if (slotEl) {
+            slotEl.style.outline = '3px solid #ffd700';
+            slotEl.style.outlineOffset = '2px';
+            slotEl.style.boxShadow = '0 0 16px 4px rgba(255,215,0,0.5)';
+            slotEl.style.zIndex = '160';
+            slotEl.style.position = 'relative';
+            slotEl.style.cursor = 'pointer';
+            slotEl.classList.add('target-highlight');
+          }
+        }
       }
-    };
-    // ESC to dismiss
-    const escHandler = (e) => {
-      if (e.key === 'Escape') { overlay.remove(); document.removeEventListener('keydown', escHandler); }
-    };
-    document.addEventListener('keydown', escHandler);
-  }
-
-  // ─── Attack Arrow (SVG) ────────────────────────────────────
-
-  _createAttackArrow() {
-    this._removeAttackArrow();
-
-    // Find the attacking unit element
-    const attackerEl = document.querySelector(`.game-card[data-instance="${this.attackingUnit}"]`);
-    if (!attackerEl) return;
-
-    const rect = attackerEl.getBoundingClientRect();
-    const originX = rect.left + rect.width / 2;
-    const originY = rect.top + rect.height / 2;
-    this._attackArrowOrigin = { x: originX, y: originY };
-
-    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-    svg.setAttribute('class', 'attack-arrow-svg');
-    svg.setAttribute('width', '100%');
-    svg.setAttribute('height', '100%');
-    svg.style.cssText = 'position:fixed;inset:0;z-index:60;pointer-events:none;';
-    svg.innerHTML = `
-      <defs>
-        <linearGradient id="arrow-grad" x1="0%" y1="0%" x2="100%" y2="0%">
-          <stop offset="0%" style="stop-color:#ff2222;stop-opacity:0.9"/>
-          <stop offset="50%" style="stop-color:#ff4444;stop-opacity:1"/>
-          <stop offset="100%" style="stop-color:#ff6666;stop-opacity:1"/>
-        </linearGradient>
-        <marker id="arrowhead" markerWidth="12" markerHeight="10" refX="10" refY="5" orient="auto">
-          <polygon points="0 0, 12 5, 0 10" fill="url(#arrow-grad)" />
-        </marker>
-        <filter id="arrow-glow">
-          <feGaussianBlur stdDeviation="3" result="blur"/>
-          <feMerge>
-            <feMergeNode in="blur"/>
-            <feMergeNode in="SourceGraphic"/>
-          </feMerge>
-        </filter>
-      </defs>
-      <line id="attack-arrow-line"
-        x1="${originX}" y1="${originY}"
-        x2="${originX}" y2="${originY}"
-        stroke="url(#arrow-grad)" stroke-width="4"
-        stroke-linecap="round" stroke-dasharray="8 4"
-        marker-end="url(#arrowhead)"
-        filter="url(#arrow-glow)"
-        opacity="0.9"
-      />
-    `;
-
-    document.body.appendChild(svg);
-    this._attackArrowSvg = svg;
-    this._attackArrowLine = svg.querySelector('#attack-arrow-line');
-  }
-
-  _updateAttackArrow(x, y) {
-    if (this._attackArrowLine && this._attackArrowOrigin) {
-      this._attackArrowLine.setAttribute('x2', x);
-      this._attackArrowLine.setAttribute('y2', y);
     }
   }
 
-  _removeAttackArrow() {
-    if (this._attackArrowSvg) {
-      this._attackArrowSvg.remove();
-      this._attackArrowSvg = null;
-      this._attackArrowLine = null;
-      this._attackArrowOrigin = null;
-    }
-    if (this._attackArrowCleanup) {
-      this._attackArrowCleanup();
-      this._attackArrowCleanup = null;
-    }
+  /**
+   * Remove all attack target highlights from the field.
+   */
+  _removeAttackHighlights() {
+    SharedUI.removeAttackHighlights();
   }
 
   // ─── Attack Declaration Animation ─────────────────────────
@@ -2973,74 +2832,7 @@ export class GameUI {
    * Shows a larger preview next to the cursor when hovering .popup-card-thumb or .response-card-img
    */
   _attachPopupHoverZoom(container) {
-    const imgs = container.querySelectorAll('.popup-card-thumb, .response-card-img');
-    let preview = null;
-
-    imgs.forEach(img => {
-      img.style.cursor = 'pointer';
-
-      img.addEventListener('mouseenter', (e) => {
-        const cardId = img.dataset.cardId || img.alt;
-        const src = img.src;
-        if (!src) return;
-
-        // Build stat tokens HTML if card has stat data
-        let statHtml = '';
-        if (img.dataset.atk !== undefined && img.dataset.atk !== '') {
-          const atk = parseInt(img.dataset.atk);
-          const def = parseInt(img.dataset.def);
-          const baseAtk = parseInt(img.dataset.baseAtk);
-          const baseDef = parseInt(img.dataset.baseDef);
-          const damage = parseInt(img.dataset.damage || '0');
-          const remainingDef = def - damage;
-
-          const atkColor = atk > baseAtk ? '#4cff4c' : atk < baseAtk ? '#ff4c4c' : '#fff';
-          const defColor = remainingDef > baseDef ? '#4cff4c' : remainingDef < baseDef ? '#ff4c4c' : '#fff';
-
-          statHtml = `
-            <div style="display:flex;justify-content:space-between;width:200px;margin-top:6px;gap:4px">
-              <div style="flex:1;background:rgba(255,60,60,0.2);border:1px solid rgba(255,60,60,0.4);border-radius:6px;padding:4px 8px;text-align:center;font-size:0.8rem;font-weight:bold;color:${atkColor}">
-                ⚔ ${atk}${atk !== baseAtk ? ` <span style="font-size:0.65rem;opacity:0.6">(${baseAtk})</span>` : ''}
-              </div>
-              <div style="flex:1;background:rgba(60,120,255,0.2);border:1px solid rgba(60,120,255,0.4);border-radius:6px;padding:4px 8px;text-align:center;font-size:0.8rem;font-weight:bold;color:${defColor}">
-                🛡 ${remainingDef}${remainingDef !== baseDef ? ` <span style="font-size:0.65rem;opacity:0.6">(${baseDef})</span>` : ''}
-              </div>
-            </div>
-          `;
-        }
-
-        preview = document.createElement('div');
-        preview.className = 'popup-hover-preview';
-        preview.innerHTML = `
-          <img src="${src}" alt="${cardId}" style="width:200px;height:auto;border-radius:var(--radius-card);box-shadow:0 8px 32px rgba(0,0,0,0.8),0 0 30px rgba(255,213,79,0.15)" />
-          ${statHtml}
-        `;
-        preview.style.cssText = 'position:fixed;z-index:9999;pointer-events:none;';
-        document.body.appendChild(preview);
-
-        // Position the preview
-        const rect = img.getBoundingClientRect();
-        const previewW = 220;
-        let left = rect.right + 12;
-        if (left + previewW > window.innerWidth) {
-          left = rect.left - previewW - 12;
-        }
-        let top = rect.top;
-        const previewH = statHtml ? 340 : 300;
-        if (top + previewH > window.innerHeight) {
-          top = window.innerHeight - previewH - 10;
-        }
-        preview.style.left = `${left}px`;
-        preview.style.top = `${top}px`;
-      });
-
-      img.addEventListener('mouseleave', () => {
-        if (preview) {
-          preview.remove();
-          preview = null;
-        }
-      });
-    });
+    SharedUI.attachPopupHoverZoom(container);
   }
 
   /**

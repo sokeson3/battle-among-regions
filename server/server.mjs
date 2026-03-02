@@ -29,6 +29,7 @@ const PORT = process.env.PORT || 4000;
 class RoomManager {
     constructor() {
         this.rooms = new Map(); // roomCode -> Room
+        this.matchQueue = [];   // [{ ws, name }] — players waiting for a match
     }
 
     generateCode() {
@@ -41,11 +42,25 @@ class RoomManager {
         return code;
     }
 
-    createRoom(ws, playerName, region) {
+    /**
+     * Assign two unique random regions to the players in a room.
+     */
+    assignRandomRegions(room) {
+        const allRegions = ['Northern', 'Eastern', 'Southern', 'Western'];
+        // Shuffle and pick 2
+        for (let i = allRegions.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [allRegions[i], allRegions[j]] = [allRegions[j], allRegions[i]];
+        }
+        room.players[0].region = allRegions[0];
+        room.players[1].region = allRegions[1];
+    }
+
+    createRoom(ws, playerName) {
         const code = this.generateCode();
         const room = {
             code,
-            players: [{ ws, name: playerName, region, id: 0 }],
+            players: [{ ws, name: playerName, region: null, id: 0 }],
             controller: null,
             phase: 'LOBBY', // LOBBY, LANDMARK, MULLIGAN, PLAYING
             landmarkSelections: {},
@@ -55,14 +70,42 @@ class RoomManager {
         return room;
     }
 
-    joinRoom(code, ws, playerName, region) {
+    joinRoom(code, ws, playerName) {
         const room = this.rooms.get(code);
         if (!room) return { error: 'Room not found.' };
         if (room.players.length >= 2) return { error: 'Room is full.' };
         if (room.phase !== 'LOBBY') return { error: 'Game already in progress.' };
 
-        room.players.push({ ws, name: playerName, region, id: 1 });
+        room.players.push({ ws, name: playerName, region: null, id: 1 });
         return { room };
+    }
+
+    // ─── Matchmaking Queue ───────────────────────────────────
+
+    addToQueue(ws, name) {
+        // Remove if already in queue
+        this.removeFromQueue(ws);
+        this.matchQueue.push({ ws, name });
+    }
+
+    removeFromQueue(ws) {
+        this.matchQueue = this.matchQueue.filter(entry => entry.ws !== ws);
+    }
+
+    /**
+     * Try to pair two players from the queue.
+     * Returns { room } if matched, null otherwise.
+     */
+    tryMatchFromQueue() {
+        if (this.matchQueue.length < 2) return null;
+
+        const p1 = this.matchQueue.shift();
+        const p2 = this.matchQueue.shift();
+
+        const room = this.createRoom(p1.ws, p1.name);
+        room.players.push({ ws: p2.ws, name: p2.name, region: null, id: 1 });
+        this.assignRandomRegions(room);
+        return room;
     }
 
     removePlayer(ws) {
@@ -541,8 +584,44 @@ wss.on('connection', (ws) => {
         }
 
         switch (msg.type) {
+            case 'FIND_MATCH': {
+                const name = msg.playerName || 'Player';
+                roomMgr.addToQueue(ws, name);
+                roomMgr.send(ws, 'SEARCHING', { message: 'Looking for an opponent...' });
+                console.log(`🔍 ${name} is searching for a match (queue: ${roomMgr.matchQueue.length})`);
+
+                const matched = roomMgr.tryMatchFromQueue();
+                if (matched) {
+                    // Notify both players of the match
+                    for (const p of matched.players) {
+                        const opp = matched.players.find(op => op.id !== p.id);
+                        roomMgr.send(p.ws, 'MATCH_FOUND', {
+                            yourRegion: p.region,
+                            opponentName: opp.name,
+                            opponentRegion: opp.region,
+                        });
+                    }
+                    console.log(`⚔ Match found: ${matched.players.map(p => `${p.name} (${p.region})`).join(' vs ')}`);
+
+                    try {
+                        await startGame(matched, roomMgr, csvText);
+                    } catch (err) {
+                        console.error('Failed to start game:', err);
+                        roomMgr.broadcast(matched, 'ERROR', { message: 'Failed to start game: ' + err.message });
+                    }
+                }
+                break;
+            }
+
+            case 'CANCEL_MATCH': {
+                roomMgr.removeFromQueue(ws);
+                roomMgr.send(ws, 'MATCH_CANCELLED', { message: 'Search cancelled.' });
+                console.log(`❌ Player cancelled match search`);
+                break;
+            }
+
             case 'CREATE_ROOM': {
-                const room = roomMgr.createRoom(ws, msg.playerName || 'Player 1', msg.region || 'Northern');
+                const room = roomMgr.createRoom(ws, msg.playerName || 'Player 1');
                 roomMgr.send(ws, 'ROOM_CREATED', { roomCode: room.code });
                 console.log(`🏠 Room ${room.code} created by ${msg.playerName}`);
                 break;
@@ -550,23 +629,25 @@ wss.on('connection', (ws) => {
 
             case 'JOIN_ROOM': {
                 const code = (msg.roomCode || '').toUpperCase().trim();
-                const result = roomMgr.joinRoom(code, ws, msg.playerName || 'Player 2', msg.region || 'Eastern');
+                const result = roomMgr.joinRoom(code, ws, msg.playerName || 'Player 2');
                 if (result.error) {
                     roomMgr.send(ws, 'ERROR', { message: result.error });
                 } else {
                     const room = result.room;
-                    // Notify joiner
-                    roomMgr.send(ws, 'ROOM_JOINED', {
-                        opponentName: room.players[0].name,
-                        opponentRegion: room.players[0].region,
-                    });
-                    // Notify creator
-                    roomMgr.send(room.players[0].ws, 'OPPONENT_JOINED', {
-                        opponentName: msg.playerName,
-                        opponentRegion: msg.region,
-                    });
+                    // Assign random regions now that both players are in
+                    roomMgr.assignRandomRegions(room);
 
-                    console.log(`🎮 Room ${code}: ${room.players.map(p => p.name).join(' vs ')} — Starting game!`);
+                    // Notify both players of the match with assigned regions
+                    for (const p of room.players) {
+                        const opp = room.players.find(op => op.id !== p.id);
+                        roomMgr.send(p.ws, 'MATCH_FOUND', {
+                            yourRegion: p.region,
+                            opponentName: opp.name,
+                            opponentRegion: opp.region,
+                        });
+                    }
+
+                    console.log(`🎮 Room ${code}: ${room.players.map(p => `${p.name} (${p.region})`).join(' vs ')} — Starting game!`);
 
                     // Start the game
                     try {
@@ -598,6 +679,7 @@ wss.on('connection', (ws) => {
 
     ws.on('close', () => {
         console.log('🔌 WebSocket disconnected');
+        roomMgr.removeFromQueue(ws);
         roomMgr.removePlayer(ws);
     });
 

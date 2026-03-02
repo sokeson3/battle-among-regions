@@ -1,0 +1,12 @@
+{
+    "appId": "com.bar.battleamongregions",
+    "appName": "Battle Among Regions",
+    "webDir": "dist",
+    "server": {
+        "androidScheme": "https"
+    },
+    "android": {
+        "backgroundColor": "#0a0e1a",
+        "allowMixedContent": true
+    }
+}

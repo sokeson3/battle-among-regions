@@ -4,6 +4,7 @@
 
 import { NetworkManager } from '../online/NetworkManager.js';
 import { PHASES } from '../engine/GameState.js';
+import * as SharedUI from './SharedUI.js';
 
 export class OnlineGameUI {
     /**
@@ -25,6 +26,13 @@ export class OnlineGameUI {
     // ─── Connection ──────────────────────────────────────────
 
     async connectToServer() {
+        // Disconnect any previous connection to avoid stale event interference
+        if (this.net.connected || this.net.ws) {
+            this.net.disconnect();
+        }
+        // Clear old event listeners to prevent duplicate handler stacking
+        this.net.removeAllListeners();
+
         // Use env var for production (set in .env.production), fall back to same-origin or localhost
         const envUrl = typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_SERVER_URL;
         let url;
@@ -48,17 +56,21 @@ export class OnlineGameUI {
     }
 
     _wireNetworkEvents() {
+        this.net.on('SEARCHING', () => {
+            // Server acknowledged search — already showing searching UI
+        });
+
+        this.net.on('MATCH_FOUND', (msg) => {
+            this._showMatchFound(msg.yourRegion, msg.opponentName, msg.opponentRegion);
+        });
+
+        this.net.on('MATCH_CANCELLED', () => {
+            this.showLobby();
+        });
+
         this.net.on('ROOM_CREATED', (msg) => {
             this.roomCode = msg.roomCode;
             this._showWaitingForOpponent();
-        });
-
-        this.net.on('ROOM_JOINED', (msg) => {
-            this._showWaitingForGame(msg.opponentName, msg.opponentRegion);
-        });
-
-        this.net.on('OPPONENT_JOINED', (msg) => {
-            this._showWaitingForGame(msg.opponentName, msg.opponentRegion);
         });
 
         this.net.on('REQUEST_LANDMARK', (msg) => {
@@ -83,7 +95,6 @@ export class OnlineGameUI {
         this.net.on('GAME_STATE', (msg) => {
             this.myPlayerId = msg.yourPlayerId;
             this.currentState = msg.state;
-            // Only re-render if we're in the playing phase
             if (this.currentState.phase !== 'SETUP' && this.currentState.phase !== 'MULLIGAN') {
                 this._renderOnlineGame();
             }
@@ -138,10 +149,10 @@ export class OnlineGameUI {
         this.app.innerHTML = `
             <div class="main-menu online-lobby">
                 <h1 class="menu-title">⚔ Online Battle</h1>
-                <p class="menu-subtitle">Play against a friend online</p>
+                <p class="menu-subtitle">Play against other players online</p>
                 <div class="menu-buttons">
-                    <button class="menu-btn primary" id="btn-create">Create Room</button>
-                    <button class="menu-btn" id="btn-join">Join Room</button>
+                    <button class="menu-btn primary online-glow" id="btn-quick-match">⚡ Quick Match</button>
+                    <button class="menu-btn" id="btn-private-match">🔒 Private Match</button>
                     <button class="menu-btn" id="btn-back">← Back to Menu</button>
                 </div>
                 <div class="online-status" id="connection-status">
@@ -150,78 +161,151 @@ export class OnlineGameUI {
             </div>
         `;
 
-        document.getElementById('btn-create').onclick = () => this._showCreateRoom();
-        document.getElementById('btn-join').onclick = () => this._showJoinRoom();
+        document.getElementById('btn-quick-match').onclick = () => this._showQuickMatch();
+        document.getElementById('btn-private-match').onclick = () => this._showPrivateMatch();
         document.getElementById('btn-back').onclick = () => {
             this.net.disconnect();
             this.gameUI.showMenu();
         };
     }
 
-    _showCreateRoom() {
+    _showQuickMatch() {
         this.app.innerHTML = `
             <div class="main-menu online-lobby">
-                <h1 class="menu-title">Create Room</h1>
-                <p class="menu-subtitle">Choose your name and region</p>
+                <h1 class="menu-title">⚡ Quick Match</h1>
+                <p class="menu-subtitle">Enter your name and find an opponent</p>
                 <div class="online-form">
-                    <input type="text" class="online-input" id="player-name" placeholder="Your Name" maxlength="20" value="Player 1" />
-                    <div class="region-grid online-region-grid">
-                        ${this._renderRegionCard('Northern', 'north', 'Resilient defenders.')}
-                        ${this._renderRegionCard('Eastern', 'east', 'Cunning strategists.')}
-                        ${this._renderRegionCard('Southern', 'south', 'Aggressive warriors.')}
-                        ${this._renderRegionCard('Western', 'west', 'Adaptable tricksters.')}
-                    </div>
+                    <input type="text" class="online-input" id="player-name" placeholder="Your Name" maxlength="20" value="Player" />
+                    <button class="menu-btn primary" id="btn-search">🔍 Find Opponent</button>
                     <button class="menu-btn" id="btn-lobby-back">← Back</button>
                 </div>
             </div>
         `;
 
-        document.querySelectorAll('.region-card').forEach(card => {
-            card.onclick = () => {
-                const region = card.dataset.region;
-                const name = document.getElementById('player-name').value.trim() || 'Player 1';
-                this.net.createRoom(name, region);
-            };
-        });
+        document.getElementById('btn-search').onclick = () => {
+            const name = document.getElementById('player-name').value.trim() || 'Player';
+            this.net.findMatch(name);
+            this._showSearching();
+        };
 
         document.getElementById('btn-lobby-back').onclick = () => this.showLobby();
+    }
+
+    _showSearching() {
+        this.app.innerHTML = `
+            <div class="main-menu online-lobby">
+                <h1 class="menu-title">⚡ Quick Match</h1>
+                <div class="waiting-animation">
+                    <div class="waiting-dots">
+                        <span></span><span></span><span></span>
+                    </div>
+                    <p>Searching for an opponent...</p>
+                </div>
+                <button class="menu-btn" id="btn-cancel-search">✕ Cancel</button>
+            </div>
+        `;
+
+        document.getElementById('btn-cancel-search').onclick = () => {
+            this.net.cancelMatch();
+            this.showLobby();
+        };
+    }
+
+    _showMatchFound(yourRegion, opponentName, opponentRegion) {
+        const yourRegionClass = this._getRegionClass(yourRegion);
+        const oppRegionClass = this._getRegionClass(opponentRegion);
+
+        this.app.innerHTML = `
+            <div class="main-menu online-lobby">
+                <h1 class="menu-title" style="color:var(--accent-gold)">⚔ Match Found!</h1>
+                <div class="match-found-display" style="display:flex;align-items:center;justify-content:center;gap:32px;margin:24px 0">
+                    <div class="match-player" style="text-align:center">
+                        <div class="player-avatar ${yourRegionClass}" style="width:60px;height:60px;font-size:1.5rem;margin:0 auto 8px;display:flex;align-items:center;justify-content:center;border-radius:50%">You</div>
+                        <div style="font-size:1.1rem;font-weight:bold;color:var(--text-primary)">${yourRegion}</div>
+                    </div>
+                    <div style="font-size:2rem;color:var(--text-muted)">VS</div>
+                    <div class="match-player" style="text-align:center">
+                        <div class="player-avatar ${oppRegionClass}" style="width:60px;height:60px;font-size:1.5rem;margin:0 auto 8px;display:flex;align-items:center;justify-content:center;border-radius:50%">${opponentName[0]}</div>
+                        <div style="font-size:0.9rem;color:var(--text-secondary)">${opponentName}</div>
+                        <div style="font-size:1.1rem;font-weight:bold;color:var(--text-primary)">${opponentRegion}</div>
+                    </div>
+                </div>
+                <div class="waiting-animation">
+                    <div class="waiting-dots">
+                        <span></span><span></span><span></span>
+                    </div>
+                    <p>Setting up the game...</p>
+                </div>
+            </div>
+        `;
+    }
+
+    _showPrivateMatch() {
+        this.app.innerHTML = `
+            <div class="main-menu online-lobby">
+                <h1 class="menu-title">🔒 Private Match</h1>
+                <p class="menu-subtitle">Play with a friend using a room code</p>
+                <div class="menu-buttons">
+                    <button class="menu-btn primary" id="btn-create">🏠 Create Room</button>
+                    <button class="menu-btn" id="btn-join">🔗 Join Room</button>
+                    <button class="menu-btn" id="btn-lobby-back">← Back</button>
+                </div>
+            </div>
+        `;
+
+        document.getElementById('btn-create').onclick = () => this._showCreateRoom();
+        document.getElementById('btn-join').onclick = () => this._showJoinRoom();
+        document.getElementById('btn-lobby-back').onclick = () => this.showLobby();
+    }
+
+    _showCreateRoom() {
+        this.app.innerHTML = `
+            <div class="main-menu online-lobby">
+                <h1 class="menu-title">🏠 Create Room</h1>
+                <p class="menu-subtitle">Enter your name to create a private room</p>
+                <div class="online-form">
+                    <input type="text" class="online-input" id="player-name" placeholder="Your Name" maxlength="20" value="Player 1" />
+                    <button class="menu-btn primary" id="btn-create-go">Create Room</button>
+                    <button class="menu-btn" id="btn-lobby-back">← Back</button>
+                </div>
+            </div>
+        `;
+
+        document.getElementById('btn-create-go').onclick = () => {
+            const name = document.getElementById('player-name').value.trim() || 'Player 1';
+            this.net.createRoom(name);
+        };
+
+        document.getElementById('btn-lobby-back').onclick = () => this._showPrivateMatch();
     }
 
     _showJoinRoom() {
         this.app.innerHTML = `
             <div class="main-menu online-lobby">
-                <h1 class="menu-title">Join Room</h1>
-                <p class="menu-subtitle">Enter the room code and choose your region</p>
+                <h1 class="menu-title">🔗 Join Room</h1>
+                <p class="menu-subtitle">Enter the room code to join a private match</p>
                 <div class="online-form">
                     <input type="text" class="online-input room-code-input" id="room-code" placeholder="ROOM CODE" maxlength="4" style="text-transform:uppercase;text-align:center;font-size:2rem;letter-spacing:0.3em" />
                     <input type="text" class="online-input" id="player-name" placeholder="Your Name" maxlength="20" value="Player 2" />
-                    <div class="region-grid online-region-grid">
-                        ${this._renderRegionCard('Northern', 'north', 'Resilient defenders.')}
-                        ${this._renderRegionCard('Eastern', 'east', 'Cunning strategists.')}
-                        ${this._renderRegionCard('Southern', 'south', 'Aggressive warriors.')}
-                        ${this._renderRegionCard('Western', 'west', 'Adaptable tricksters.')}
-                    </div>
+                    <button class="menu-btn primary" id="btn-join-go">Join Room</button>
                     <button class="menu-btn" id="btn-lobby-back">← Back</button>
                 </div>
             </div>
         `;
 
-        document.querySelectorAll('.region-card').forEach(card => {
-            card.onclick = () => {
-                const region = card.dataset.region;
-                const code = document.getElementById('room-code').value.trim().toUpperCase();
-                const name = document.getElementById('player-name').value.trim() || 'Player 2';
+        document.getElementById('btn-join-go').onclick = () => {
+            const code = document.getElementById('room-code').value.trim().toUpperCase();
+            const name = document.getElementById('player-name').value.trim() || 'Player 2';
 
-                if (code.length !== 4) {
-                    this._showToast('Please enter a 4-character room code.');
-                    return;
-                }
+            if (code.length !== 4) {
+                this._showToast('Please enter a 4-character room code.');
+                return;
+            }
 
-                this.net.joinRoom(code, name, region);
-            };
-        });
+            this.net.joinRoom(code, name);
+        };
 
-        document.getElementById('btn-lobby-back').onclick = () => this.showLobby();
+        document.getElementById('btn-lobby-back').onclick = () => this._showPrivateMatch();
     }
 
     _showWaitingForOpponent() {
@@ -252,21 +336,6 @@ export class OnlineGameUI {
             this.net.disconnect();
             this.gameUI.showMenu();
         };
-    }
-
-    _showWaitingForGame(opponentName, opponentRegion) {
-        this.app.innerHTML = `
-            <div class="main-menu online-lobby">
-                <h1 class="menu-title">Match Found!</h1>
-                <p class="menu-subtitle">vs ${opponentName} (${opponentRegion})</p>
-                <div class="waiting-animation">
-                    <div class="waiting-dots">
-                        <span></span><span></span><span></span>
-                    </div>
-                    <p>Setting up the game...</p>
-                </div>
-            </div>
-        `;
     }
 
     _showWaitingScreen(message) {
@@ -960,54 +1029,11 @@ export class OnlineGameUI {
     }
 
     /**
-     * Show a floating action menu near a card (YGO-style) — matches GameUI
-     */
+ * Show a floating action menu near a card (YGO-style) — matches GameUI
+ */
     _showCardActionMenu(rect, options, callback) {
-        // Remove any existing menu
-        document.querySelectorAll('.card-action-menu-overlay').forEach(e => e.remove());
-
-        const overlay = document.createElement('div');
-        overlay.className = 'card-action-menu-overlay';
-        overlay.style.cssText = 'position:fixed;inset:0;z-index:65;';
-
-        const menu = document.createElement('div');
-        menu.className = 'card-action-menu';
-        // Position the menu above the card
-        const menuX = Math.min(rect.left + rect.width / 2, window.innerWidth - 100);
-        const menuY = rect.top - 8;
-        menu.style.cssText = `
-            position:fixed;
-            left:${menuX}px;
-            top:${menuY}px;
-            transform:translate(-50%, -100%);
-            z-index:66;
-        `;
-
-        menu.innerHTML = options.map((opt, i) => `
-            <div class="card-action-option" data-idx="${i}">
-                <span class="card-action-icon">${opt.icon || ''}</span>
-                <span>${opt.label}</span>
-            </div>
-        `).join('');
-
-        overlay.appendChild(menu);
-        document.body.appendChild(overlay);
-
-        // Click on option
-        menu.querySelectorAll('.card-action-option').forEach(el => {
-            el.onclick = (e) => {
-                e.stopPropagation();
-                const idx = parseInt(el.dataset.idx);
-                overlay.remove();
-                callback(options[idx]);
-            };
-        });
-
-        // Click outside to cancel
-        overlay.onclick = (e) => {
-            if (e.target === overlay) overlay.remove();
-        };
-    }
+        SharedUI.showCardActionMenu(rect, options, callback);
+    };
 
     // ─── Field Card Click ────────────────────────────────────
 
@@ -1074,107 +1100,27 @@ export class OnlineGameUI {
     // ─── Dialogs ─────────────────────────────────────────────
 
     _showTargetSelection(targets, description) {
-        const overlay = document.createElement('div');
-        overlay.className = 'choice-overlay';
-        overlay.innerHTML = `
-            <div class="choice-dialog">
-                <h3>Select Target</h3>
-                <p>${description}</p>
-                <div class="choice-list">
-                    ${targets.map(t => `
-                        <button class="choice-btn" data-id="${t.instanceId}">
-                            <img src="./output-web/${t.cardId}.webp" style="width:40px;height:56px;border-radius:4px;margin-right:8px" onerror="this.style.display='none'" />
-                            ${t.name}
-                        </button>
-                    `).join('')}
-                </div>
-            </div>
-        `;
-        document.body.appendChild(overlay);
-
-        overlay.querySelectorAll('.choice-btn').forEach(btn => {
-            btn.onclick = () => {
-                const targetId = btn.dataset.id;
-                this.net.selectTarget(targetId);
-                overlay.remove();
-            };
+        SharedUI.showTargetSelectionDialog(document.body, targets, description, (target) => {
+            if (target) this.net.selectTarget(target.instanceId);
         });
     }
 
     _showChoiceDialog(options, description, localCallback = null) {
-        const overlay = document.createElement('div');
-        overlay.className = 'choice-overlay';
-        overlay.innerHTML = `
-            <div class="choice-dialog">
-                <h3>${description}</h3>
-                <div class="choice-list">
-                    ${options.map((opt, i) => `
-                        <button class="choice-btn" data-index="${i}">${opt.label || opt}</button>
-                    `).join('')}
-                </div>
-            </div>
-        `;
-        document.body.appendChild(overlay);
-
-        overlay.querySelectorAll('.choice-btn').forEach(btn => {
-            btn.onclick = () => {
-                const idx = parseInt(btn.dataset.index);
-                if (localCallback) {
-                    localCallback(options[idx]);
-                } else {
-                    this.net.makeChoice(options[idx]);
-                }
-                overlay.remove();
-            };
+        SharedUI.showChoiceDialog(document.body, options, description, (choice) => {
+            if (localCallback) localCallback(choice);
+            else this.net.makeChoice(choice);
         });
     }
 
     _showResponseDialog(faceDownCards) {
-        const overlay = document.createElement('div');
-        overlay.className = 'choice-overlay';
-        overlay.innerHTML = `
-            <div class="choice-dialog">
-                <h3>Opponent Action!</h3>
-                <p>Would you like to activate a face-down card?</p>
-                <div class="choice-list">
-                    ${faceDownCards.map(c => `
-                        <button class="choice-btn response-activate" data-id="${c.instanceId}">
-                            <img src="./output-web/${c.cardId}.webp" style="width:40px;height:56px;border-radius:4px;margin-right:8px" onerror="this.style.display='none'" />
-                            Activate ${c.name}
-                        </button>
-                    `).join('')}
-                    <button class="choice-btn response-pass">No, Pass</button>
-                </div>
-            </div>
-        `;
-        document.body.appendChild(overlay);
-
-        overlay.querySelectorAll('.response-activate').forEach(btn => {
-            btn.onclick = () => {
-                this.net.respondToPrompt({ activate: true, cardInstanceId: btn.dataset.id });
-                overlay.remove();
-            };
+        const cards = faceDownCards.map(c => ({ instanceId: c.instanceId, cardId: c.cardId, name: c.name }));
+        SharedUI.showResponseDialog(document.body, cards, (result) => {
+            this.net.respondToPrompt(result);
         });
-
-        overlay.querySelector('.response-pass').onclick = () => {
-            this.net.respondToPrompt({ activate: false });
-            overlay.remove();
-        };
-    }
+    };
 
     _showCardZoom(cardId) {
-        if (!cardId) return;
-        const overlay = document.createElement('div');
-        overlay.className = 'card-zoom-overlay';
-        overlay.innerHTML = `
-            <div class="card-zoom-container">
-                <img src="./output-web/${cardId}.webp" alt="Card" class="card-zoom-img" />
-            </div>
-        `;
-        document.body.appendChild(overlay);
-        overlay.onclick = () => overlay.remove();
-        const escHandler = (e) => { if (e.key === 'Escape') { overlay.remove(); document.removeEventListener('keydown', escHandler); } };
-        document.addEventListener('keydown', escHandler);
+        SharedUI.showCardZoom(cardId);
     }
 
     // ─── Game Over ──────────────────────────────────────────
@@ -1223,18 +1169,6 @@ export class OnlineGameUI {
     // ─── Utility ─────────────────────────────────────────────
 
     _showToast(message) {
-        // Reuse GameUI's toast method if available, otherwise create our own
-        const existing = document.querySelector('.toast-message');
-        if (existing) existing.remove();
-
-        const toast = document.createElement('div');
-        toast.className = 'toast-message';
-        toast.textContent = message;
-        document.body.appendChild(toast);
-        setTimeout(() => toast.classList.add('show'), 10);
-        setTimeout(() => {
-            toast.classList.remove('show');
-            setTimeout(() => toast.remove(), 300);
-        }, 2500);
+        SharedUI.showToast(message);
     }
 }

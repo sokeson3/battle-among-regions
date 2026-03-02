@@ -8,6 +8,7 @@ export class NetworkManager {
         this.listeners = new Map();
         this.connected = false;
         this.serverUrl = null;
+        this._intentionalDisconnect = false;
     }
 
     /**
@@ -18,6 +19,7 @@ export class NetworkManager {
     connect(url) {
         return new Promise((resolve, reject) => {
             this.serverUrl = url;
+            this._intentionalDisconnect = false;
             this.ws = new WebSocket(url);
 
             this.ws.onopen = () => {
@@ -30,7 +32,9 @@ export class NetworkManager {
             this.ws.onclose = () => {
                 this.connected = false;
                 console.log('🔌 Disconnected from server');
-                this.emit('disconnected');
+                if (!this._intentionalDisconnect) {
+                    this.emit('disconnected');
+                }
             };
 
             this.ws.onerror = (err) => {
@@ -62,17 +66,31 @@ export class NetworkManager {
     }
 
     /**
-     * Create a new room
+     * Search for an opponent (matchmaking queue)
      */
-    createRoom(playerName, region) {
-        this.send('CREATE_ROOM', { playerName, region });
+    findMatch(playerName) {
+        this.send('FIND_MATCH', { playerName });
     }
 
     /**
-     * Join an existing room
+     * Cancel matchmaking search
      */
-    joinRoom(roomCode, playerName, region) {
-        this.send('JOIN_ROOM', { roomCode, playerName, region });
+    cancelMatch() {
+        this.send('CANCEL_MATCH');
+    }
+
+    /**
+     * Create a private room
+     */
+    createRoom(playerName) {
+        this.send('CREATE_ROOM', { playerName });
+    }
+
+    /**
+     * Join an existing private room
+     */
+    joinRoom(roomCode, playerName) {
+        this.send('JOIN_ROOM', { roomCode, playerName });
     }
 
     // ─── Game Actions ────────────────────────────────────────
@@ -169,15 +187,21 @@ export class NetworkManager {
         }
     }
 
+    removeAllListeners() {
+        this.listeners.clear();
+    }
+
     emit(event, data) {
         const cbs = this.listeners.get(event) || [];
         for (const cb of cbs) cb(data);
     }
 
     disconnect() {
+        this._intentionalDisconnect = true;
         if (this.ws) {
             this.ws.close();
             this.ws = null;
         }
+        this.connected = false;
     }
 }
