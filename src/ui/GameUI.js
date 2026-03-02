@@ -1865,6 +1865,15 @@ export class GameUI {
 
     this.app.appendChild(overlay);
 
+    // Click outside dialog to cancel
+    overlay.onclick = (e) => {
+      if (e.target === overlay) {
+        overlay.remove();
+        callback(null);
+      }
+    };
+    overlay.querySelector('.choice-dialog').onclick = (e) => e.stopPropagation();
+
     overlay.querySelectorAll('.choice-option').forEach(el => {
       el.onclick = () => {
         const idx = parseInt(el.dataset.idx);

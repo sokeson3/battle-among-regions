@@ -272,17 +272,22 @@ export function register(effectEngine, cardDB) {
                         withLandmarks[0].landmarkZone = withLandmarks[1].landmarkZone;
                         withLandmarks[1].landmarkZone = temp;
                         gs.log('EFFECT', 'Landmarks switched!');
+                        // Trigger landmark-placed for each moved landmark
+                        await ee.trigger(EFFECT_EVENTS.ON_LANDMARK_PLACED, { landmark: withLandmarks[0].landmarkZone, placer: ctx.sourcePlayer, targetPlayer: withLandmarks[0] });
+                        await ee.trigger(EFFECT_EVENTS.ON_LANDMARK_PLACED, { landmark: withLandmarks[1].landmarkZone, placer: ctx.sourcePlayer, targetPlayer: withLandmarks[1] });
                     } else if (choice?.value === 'move' && withoutLandmarks.length > 0) {
                         const landmark = withLandmarks[0].landmarkZone;
                         withLandmarks[0].landmarkZone = null;
                         withoutLandmarks[0].landmarkZone = landmark;
                         gs.log('EFFECT', `${landmark.name} moved to ${withoutLandmarks[0].name}'s zone!`);
+                        await ee.trigger(EFFECT_EVENTS.ON_LANDMARK_PLACED, { landmark, placer: ctx.sourcePlayer, targetPlayer: withoutLandmarks[0] });
                     }
                 } else if (withLandmarks.length === 1 && withoutLandmarks.length > 0) {
                     const landmark = withLandmarks[0].landmarkZone;
                     withLandmarks[0].landmarkZone = null;
                     withoutLandmarks[0].landmarkZone = landmark;
                     gs.log('EFFECT', `${landmark.name} moved!`);
+                    await ee.trigger(EFFECT_EVENTS.ON_LANDMARK_PLACED, { landmark, placer: ctx.sourcePlayer, targetPlayer: withoutLandmarks[0] });
                 }
             },
         }),

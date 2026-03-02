@@ -175,6 +175,9 @@ export function register(effectEngine, cardDB) {
                     players[0].landmarkZone = players[1].landmarkZone;
                     players[1].landmarkZone = temp;
                     gs.log('EFFECT', `Landmarks swapped between ${players[0].name} and ${players[1].name}!`);
+                    // Trigger landmark-placed for each moved landmark
+                    await ee.trigger(EFFECT_EVENTS.ON_LANDMARK_PLACED, { landmark: players[0].landmarkZone, placer: ctx.sourcePlayer, targetPlayer: players[0] });
+                    await ee.trigger(EFFECT_EVENTS.ON_LANDMARK_PLACED, { landmark: players[1].landmarkZone, placer: ctx.sourcePlayer, targetPlayer: players[1] });
                 }
             },
         }),
@@ -341,6 +344,8 @@ export function register(effectEngine, cardDB) {
                                     tp.landmarkZone = landmark;
                                     landmark.faceUp = true;
                                     gs.log('LANDMARK', `${landmark.name} placed in ${tp.name}'s Landmark Zone!`);
+                                    // Trigger landmark-placed so E005 etc. react
+                                    await ee.trigger(EFFECT_EVENTS.ON_LANDMARK_PLACED, { landmark, placer: ctx.sourcePlayer, targetPlayer: tp });
                                 }
                             }
                         }
@@ -615,25 +620,46 @@ export function register(effectEngine, cardDB) {
             cardId: 'E034',
             trigger: 'SELF',
             description: 'Shuffle and randomly redistribute all Landmarks',
-            execute: (gs, ctx, ee) => {
-                const landmarks = [];
+            execute: async (gs, ctx, ee) => {
+                // Collect landmarks and remember which players had them
+                const playersWithLandmarks = [];
+                const originalLandmarks = [];
                 for (const p of gs.players) {
                     if (p.landmarkZone) {
-                        landmarks.push(p.landmarkZone);
+                        playersWithLandmarks.push(p);
+                        originalLandmarks.push(p.landmarkZone);
                         p.landmarkZone = null;
                     }
                 }
-                // Shuffle
-                for (let i = landmarks.length - 1; i > 0; i--) {
-                    const j = Math.floor(Math.random() * (i + 1));
-                    [landmarks[i], landmarks[j]] = [landmarks[j], landmarks[i]];
+                if (originalLandmarks.length < 2) {
+                    // Need at least 2 landmarks to shuffle meaningfully
+                    if (originalLandmarks.length === 1) {
+                        playersWithLandmarks[0].landmarkZone = originalLandmarks[0];
+                    }
+                    gs.log('EFFECT', 'Not enough Landmarks on the field to shuffle.');
+                    return;
                 }
-                // Place randomly
-                const players = gs.players.filter(p => p.isAlive);
-                for (let i = 0; i < Math.min(landmarks.length, players.length); i++) {
-                    players[i].landmarkZone = landmarks[i];
+                // Shuffle landmarks, guaranteeing at least one changes position
+                let shuffled;
+                do {
+                    shuffled = [...originalLandmarks];
+                    for (let i = shuffled.length - 1; i > 0; i--) {
+                        const j = Math.floor(Math.random() * (i + 1));
+                        [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+                    }
+                } while (shuffled.every((lm, idx) => lm === originalLandmarks[idx]));
+
+                // Assign shuffled landmarks back to the players who had them
+                for (let i = 0; i < playersWithLandmarks.length; i++) {
+                    playersWithLandmarks[i].landmarkZone = shuffled[i];
+                    shuffled[i].faceUp = true;
                 }
                 gs.log('EFFECT', 'All Landmarks shuffled and redistributed!');
+                // Trigger landmark-placed for each redistributed landmark
+                for (let i = 0; i < playersWithLandmarks.length; i++) {
+                    gs.emit('LANDMARK_PLACED', { card: shuffled[i], player: ctx.sourcePlayer, targetPlayer: playersWithLandmarks[i] });
+                    await ee.trigger(EFFECT_EVENTS.ON_LANDMARK_PLACED, { landmark: shuffled[i], placer: ctx.sourcePlayer, targetPlayer: playersWithLandmarks[i] });
+                }
             },
         }),
     ]);

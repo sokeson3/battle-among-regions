@@ -912,54 +912,97 @@ export class OnlineGameUI {
             return;
         }
 
-        // Build action choices based on card type
-        const choices = [];
+        // Get the card element's position for the floating menu
+        const rect = el.getBoundingClientRect();
 
         if (cardType === 'Unit') {
-            choices.push({ label: `⚔ Summon in ATK Position`, value: 'summon-atk' });
-            choices.push({ label: `🛡 Set in DEF Position`, value: 'summon-def' });
+            const options = [
+                { label: '⚔ Summon in ATK', value: 'summon-atk', icon: '⚔' },
+                { label: '🛡 Set in DEF', value: 'summon-def', icon: '🛡' },
+            ];
+            this._showCardActionMenu(rect, options, (choice) => {
+                const position = choice.value === 'summon-def' ? 'DEF' : 'ATK';
+                this.pendingPlacement = { type: 'Unit', cardInstanceId: instanceId, position, playerId: this.myPlayerId };
+                this._renderOnlineGame();
+            });
         } else if (cardType === 'Spell') {
-            choices.push({ label: `✨ Activate Spell`, value: 'play-spell' });
-            choices.push({ label: `⬇ Set Face-Down`, value: 'set-spell' });
-        } else if (cardType === 'Trap') {
-            choices.push({ label: `⬇ Set Trap Face-Down`, value: 'set-trap' });
-        } else if (cardType === 'Landmark') {
-            choices.push({ label: `🏔 Play Landmark`, value: 'play-landmark' });
-        }
-
-        choices.push({ label: `🔍 View Card`, value: 'zoom' });
-        choices.push({ label: '✕ Cancel', value: 'cancel' });
-
-        this._showChoiceDialog(choices, card.name, (choice) => {
-            switch (choice.value) {
-                case 'summon-atk':
-                    this.pendingPlacement = { type: 'Unit', cardInstanceId: instanceId, position: 'ATK', playerId: this.myPlayerId };
-                    this._renderOnlineGame();
-                    break;
-                case 'summon-def':
-                    this.pendingPlacement = { type: 'Unit', cardInstanceId: instanceId, position: 'DEF', playerId: this.myPlayerId };
-                    this._renderOnlineGame();
-                    break;
-                case 'play-spell':
+            const options = [
+                { label: '✦ Activate', value: 'play-spell', icon: '✦' },
+                { label: '⬇ Set', value: 'set-spell', icon: '⬇' },
+            ];
+            this._showCardActionMenu(rect, options, (choice) => {
+                if (choice.value === 'play-spell') {
                     this.net.playSpell(instanceId);
-                    break;
-                case 'set-spell':
+                } else {
                     this.pendingPlacement = { type: 'SpellSet', cardInstanceId: instanceId, playerId: this.myPlayerId };
                     this._renderOnlineGame();
-                    break;
-                case 'set-trap':
-                    this.pendingPlacement = { type: 'TrapSet', cardInstanceId: instanceId, playerId: this.myPlayerId };
-                    this._renderOnlineGame();
-                    break;
-                case 'play-landmark':
-                    this.pendingPlacement = { type: 'Landmark', cardInstanceId: instanceId, playerId: this.myPlayerId };
-                    this._renderOnlineGame();
-                    break;
-                case 'zoom':
-                    this._showCardZoom(cardId);
-                    break;
-            }
+                }
+            });
+        } else if (cardType === 'Trap') {
+            this._showCardActionMenu(rect, [
+                { label: '⬇ Set', value: 'set-trap', icon: '⬇' },
+            ], () => {
+                this.pendingPlacement = { type: 'TrapSet', cardInstanceId: instanceId, playerId: this.myPlayerId };
+                this._renderOnlineGame();
+            });
+        } else if (cardType === 'Landmark') {
+            this._showCardActionMenu(rect, [
+                { label: '🏔 Play Landmark', value: 'play-landmark', icon: '🏔' },
+            ], () => {
+                this.pendingPlacement = { type: 'Landmark', cardInstanceId: instanceId, playerId: this.myPlayerId };
+                this._renderOnlineGame();
+            });
+        }
+    }
+
+    /**
+     * Show a floating action menu near a card (YGO-style) — matches GameUI
+     */
+    _showCardActionMenu(rect, options, callback) {
+        // Remove any existing menu
+        document.querySelectorAll('.card-action-menu-overlay').forEach(e => e.remove());
+
+        const overlay = document.createElement('div');
+        overlay.className = 'card-action-menu-overlay';
+        overlay.style.cssText = 'position:fixed;inset:0;z-index:65;';
+
+        const menu = document.createElement('div');
+        menu.className = 'card-action-menu';
+        // Position the menu above the card
+        const menuX = Math.min(rect.left + rect.width / 2, window.innerWidth - 100);
+        const menuY = rect.top - 8;
+        menu.style.cssText = `
+            position:fixed;
+            left:${menuX}px;
+            top:${menuY}px;
+            transform:translate(-50%, -100%);
+            z-index:66;
+        `;
+
+        menu.innerHTML = options.map((opt, i) => `
+            <div class="card-action-option" data-idx="${i}">
+                <span class="card-action-icon">${opt.icon || ''}</span>
+                <span>${opt.label}</span>
+            </div>
+        `).join('');
+
+        overlay.appendChild(menu);
+        document.body.appendChild(overlay);
+
+        // Click on option
+        menu.querySelectorAll('.card-action-option').forEach(el => {
+            el.onclick = (e) => {
+                e.stopPropagation();
+                const idx = parseInt(el.dataset.idx);
+                overlay.remove();
+                callback(options[idx]);
+            };
         });
+
+        // Click outside to cancel
+        overlay.onclick = (e) => {
+            if (e.target === overlay) overlay.remove();
+        };
     }
 
     // ─── Field Card Click ────────────────────────────────────

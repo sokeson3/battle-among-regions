@@ -487,6 +487,9 @@ export function register(effectEngine, cardDB) {
                     ctx.sourcePlayer.landmarkZone = target.landmarkZone;
                     target.landmarkZone = temp;
                     gs.log('EFFECT', 'Landmarks switched!');
+                    // Trigger landmark-placed for each moved landmark
+                    if (ctx.sourcePlayer.landmarkZone) await ee.trigger(EFFECT_EVENTS.ON_LANDMARK_PLACED, { landmark: ctx.sourcePlayer.landmarkZone, placer: ctx.sourcePlayer, targetPlayer: ctx.sourcePlayer });
+                    if (target.landmarkZone) await ee.trigger(EFFECT_EVENTS.ON_LANDMARK_PLACED, { landmark: target.landmarkZone, placer: ctx.sourcePlayer, targetPlayer: target });
                 }
             },
         }),
@@ -667,13 +670,16 @@ export function register(effectEngine, cardDB) {
             cardId: 'W036',
             trigger: 'SELF',
             description: 'Switch two Landmarks',
-            execute: (gs, ctx, ee) => {
+            execute: async (gs, ctx, ee) => {
                 const withLandmarks = gs.players.filter(p => p.landmarkZone);
                 if (withLandmarks.length >= 2) {
                     const temp = withLandmarks[0].landmarkZone;
                     withLandmarks[0].landmarkZone = withLandmarks[1].landmarkZone;
                     withLandmarks[1].landmarkZone = temp;
                     gs.log('EFFECT', 'Landmarks switched!');
+                    // Trigger landmark-placed for each moved landmark
+                    await ee.trigger(EFFECT_EVENTS.ON_LANDMARK_PLACED, { landmark: withLandmarks[0].landmarkZone, placer: ctx.sourcePlayer, targetPlayer: withLandmarks[0] });
+                    await ee.trigger(EFFECT_EVENTS.ON_LANDMARK_PLACED, { landmark: withLandmarks[1].landmarkZone, placer: ctx.sourcePlayer, targetPlayer: withLandmarks[1] });
                 }
             },
         }),

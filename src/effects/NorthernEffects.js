@@ -611,6 +611,8 @@ export function register(effectEngine, cardDB) {
                             targetPlayer.landmarkZone = landmark;
                             gs.log('LANDMARK', `${landmark.name} summoned from deck into ${targetPlayer.name}'s Landmark Zone!`);
                             gs.emit('LANDMARK_PLACED', { card: landmark, player: ctx.sourcePlayer });
+                            // Trigger landmark-placed for effects like E005
+                            await ee.trigger(EFFECT_EVENTS.ON_LANDMARK_PLACED, { landmark, placer: ctx.sourcePlayer, targetPlayer });
                             ee.shuffleDeck(ctx.sourcePlayer.id);
                         }
                     }
