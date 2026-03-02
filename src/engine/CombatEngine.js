@@ -190,6 +190,13 @@ export class CombatEngine {
         if (excessToDefender > 0) {
             this.gameState.log('COMBAT', `${attacker.name} deals ${excessToDefender} excess damage to ${defenderOwner.name}'s LP!`);
             this.effectEngine.dealDamageToLP(defenderOwner.id, excessToDefender, attacker.name);
+            // Trigger ON_DAMAGE_TO_LP so effects like S026 (Bounty Hunter) fire
+            await this.effectEngine.trigger('ON_DAMAGE_TO_LP', {
+                attacker,
+                defender: defenderOwner,
+                damage: excessToDefender,
+                isCombat: true,
+            });
         }
         if (excessToAttacker > 0) {
             this.gameState.log('COMBAT', `${defender.name} deals ${excessToAttacker} excess damage to ${attackerOwner.name}'s LP!`);
@@ -246,6 +253,13 @@ export class CombatEngine {
             const pierceDmg = atkDmg - defRemainingDEF;
             this.gameState.log('COMBAT', `${attacker.name} pierces for ${pierceDmg} damage to ${defenderOwner.name}'s LP!`);
             this.effectEngine.dealDamageToLP(defenderOwner.id, pierceDmg, `${attacker.name} Pierce`);
+            // Trigger ON_DAMAGE_TO_LP so effects like S026 (Bounty Hunter) fire
+            await this.effectEngine.trigger('ON_DAMAGE_TO_LP', {
+                attacker,
+                defender: defenderOwner,
+                damage: pierceDmg,
+                isCombat: true,
+            });
         }
 
         // Check destruction

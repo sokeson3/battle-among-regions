@@ -434,6 +434,8 @@ export function register(effectEngine, cardDB) {
             execute: (gs, ctx, ee) => {
                 if (ctx.target && !ctx.target.keywords.includes('SHADOW')) {
                     ctx.target.keywords.push('SHADOW');
+                    if (!ctx.target._tempKeywords) ctx.target._tempKeywords = [];
+                    ctx.target._tempKeywords.push('SHADOW');
                     gs.log('EFFECT', `${ctx.target.name} gains Shadow this turn!`);
                 }
             },
@@ -773,6 +775,7 @@ export function register(effectEngine, cardDB) {
             description: 'Negate damage spell and deal damage to opponent',
             condition: (gs, ctx) => ctx.caster?.id !== ctx.sourcePlayer.id,
             execute: (gs, ctx, ee) => {
+                gs._chainNegate = true;
                 const opponent = ctx.caster;
                 if (opponent) {
                     ee.dealDamageToLP(opponent.id, 400, 'Spell Reversal');
@@ -853,6 +856,8 @@ export function register(effectEngine, cardDB) {
             execute: (gs, ctx, ee) => {
                 if (!ctx.attacker.keywords.includes('SHADOW')) {
                     ctx.attacker.keywords.push('SHADOW');
+                    if (!ctx.attacker._tempKeywords) ctx.attacker._tempKeywords = [];
+                    ctx.attacker._tempKeywords.push('SHADOW');
                     gs.log('TRAP', `Secret Passage gives ${ctx.attacker.name} Shadow!`);
                 }
             },

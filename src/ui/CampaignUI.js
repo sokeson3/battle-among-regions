@@ -250,6 +250,22 @@ export class CampaignUI {
             regionPools[region] = buildRegionPool(region);
         }
 
+        // Remove copies of cards already in the player's saved deck from pools
+        const existingCounts = {};
+        for (const cardId of this.progress.savedDeckCardIds) {
+            existingCounts[cardId] = (existingCounts[cardId] || 0) + 1;
+        }
+        const removedCounts = {};
+        for (const region of allRegions) {
+            regionPools[region] = regionPools[region].filter(c => {
+                if (existingCounts[c.id] && (!removedCounts[c.id] || removedCounts[c.id] < existingCounts[c.id])) {
+                    removedCounts[c.id] = (removedCounts[c.id] || 0) + 1;
+                    return false;
+                }
+                return true;
+            });
+        }
+
         // Build 4 seats — one per unique region, player at 0, AI at 2
         let seatRegions;
         if (playerRegion === aiRegion) {
@@ -616,7 +632,7 @@ export class CampaignUI {
                 ...playerObj.graveyard.map(c => c.cardId),
             ].filter(id => {
                 const def = this.controller.cardDB.getCard(id);
-                return def && def.type !== 'Token' && def.type !== 'Landmark';
+                return def && def.type !== 'Token';
             });
             this.progress.savedDeckCardIds = deckCardIds;
             this.progress.completeStage(stage.id, { lpRemaining: playerLP, turns });

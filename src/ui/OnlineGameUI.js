@@ -522,6 +522,9 @@ export class OnlineGameUI {
                     </div>
                     <span class="mana-label">Total: ${player.primaryMana + player.spellMana}</span>
                 </div>
+                <div class="hand-count" title="Cards in hand" style="display:flex;align-items:center;gap:4px;font-size:0.75rem;color:var(--text-secondary);padding:2px 8px;background:rgba(255,255,255,0.05);border-radius:8px">
+                    <span>🃏</span><span>${player.hand.length}</span>
+                </div>
             </div>
         `;
     }
@@ -628,6 +631,7 @@ export class OnlineGameUI {
 
         return `
             <div class="hand-container">
+                <div class="hand-label" style="text-align:center;font-size:0.7rem;color:var(--text-muted);margin-bottom:2px">Hand (${hand.length})</div>
                 <div class="hand-cards">
                     ${hand.map(card => {
             if (card.hidden) {

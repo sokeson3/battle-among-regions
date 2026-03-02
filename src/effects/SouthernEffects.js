@@ -474,9 +474,13 @@ export function register(effectEngine, cardDB) {
             description: 'Deal 200 damage to two different units',
             execute: async (gs, ctx, ee) => {
                 const allUnits = gs.getAllFieldUnits();
+                const alreadyTargeted = [];
                 for (let i = 0; i < Math.min(2, allUnits.length); i++) {
-                    const target = await ee.requestTarget(allUnits.filter(u => u.damageTaken < u.currentDEF), `Target ${i + 1} for 200 damage`);
+                    const eligible = allUnits.filter(u => u.damageTaken < u.currentDEF && !alreadyTargeted.includes(u.instanceId));
+                    if (eligible.length === 0) break;
+                    const target = await ee.requestTarget(eligible, `Target ${i + 1} for 200 damage`);
                     if (target) {
+                        alreadyTargeted.push(target.instanceId);
                         ee.dealDamageToUnit(target, 200, 'Molten Rain');
                     }
                 }

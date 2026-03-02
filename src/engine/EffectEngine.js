@@ -163,6 +163,25 @@ export class EffectEngine {
     }
 
     /**
+     * Check landmarks for ON_SUMMON reactions (e.g. N001 Frostfell Citadel)
+     * Separate from triggerOnSummon to avoid double-firing the summoned card's own effects.
+     */
+    async triggerLandmarkOnSummon(cardInstance, player) {
+        for (const p of this.gameState.players) {
+            if (!p.isAlive || !p.landmarkZone || p.landmarkZone.silenced) continue;
+            const effects = this.getEffects(p.landmarkZone.cardId);
+            for (const effect of effects) {
+                if (effect.trigger === EFFECT_EVENTS.ON_SUMMON) {
+                    const context = { source: cardInstance, sourcePlayer: player, summonedCard: cardInstance };
+                    if (!effect.condition || effect.condition(this.gameState, context)) {
+                        await this._resolveEffect(effect, context);
+                    }
+                }
+            }
+        }
+    }
+
+    /**
      * Resolve a single effect, potentially requesting targets from UI
      * @returns {{ cancelled: boolean }} result
      */
@@ -291,6 +310,14 @@ export class EffectEngine {
                     }
                     return true;
                 });
+                // Remove temporary keywords (e.g. SHADOW from E022/E046)
+                if (unit._tempKeywords && unit._tempKeywords.length > 0) {
+                    for (const kw of unit._tempKeywords) {
+                        const idx = unit.keywords.indexOf(kw);
+                        if (idx >= 0) unit.keywords.splice(idx, 1);
+                    }
+                    unit._tempKeywords = [];
+                }
                 // Reset per-turn flags
                 unit.canBeTargeted = true;
                 unit.isImmune = false;

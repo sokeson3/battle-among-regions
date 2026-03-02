@@ -897,6 +897,9 @@ export class GameUI {
           </div>
           <span class="mana-label">Total: ${player.primaryMana + player.spellMana}</span>
         </div>
+        <div class="hand-count" title="Cards in hand" style="display:flex;align-items:center;gap:4px;font-size:0.75rem;color:var(--text-secondary);padding:2px 8px;background:rgba(255,255,255,0.05);border-radius:8px">
+          <span>🃏</span><span>${player.hand.length}</span>
+        </div>
       </div>
     `;
   }
@@ -1060,6 +1063,7 @@ export class GameUI {
 
     return `
       <div class="hand-container">
+        <div class="hand-label" style="text-align:center;font-size:0.7rem;color:var(--text-muted);margin-bottom:2px">Hand (${player.hand.length})</div>
         <div class="hand-cards">
           ${player.hand.map(card => {
       const canPlay = !isAITurn && isMainPhase && (
@@ -1814,22 +1818,128 @@ export class GameUI {
       return;
     }
 
-    // Check if all targets are cards from the active player's hand
-    const gs = this.controller.gameState;
-    const activePlayer = gs.getActivePlayer();
-    const handInstanceIds = activePlayer.hand.map(c => c.instanceId);
-    const allInHand = targets.every(t => {
+    // Check if targets are cards on the field (units/spells/traps with instanceIds visible on board)
+    const fieldInstanceIds = new Map(); // instanceId → target index
+    for (let i = 0; i < targets.length; i++) {
+      const t = targets[i];
       const instanceId = t.instanceId || t.card?.instanceId;
-      return instanceId && handInstanceIds.includes(instanceId);
-    });
+      if (instanceId) {
+        // Check if this card is actually on the field (has a matching DOM element)
+        const fieldEl = document.querySelector(`.card-slot[data-instance="${instanceId}"]`);
+        if (fieldEl) {
+          fieldInstanceIds.set(instanceId, i);
+        }
+      }
+    }
 
-    if (allInHand && targets.length > 0) {
-      // Hand-based selection: highlight cards in hand and let player click them
-      this._showHandSelection(targets, description, callback);
+    // If ALL targets are on the field → use on-field click selection
+    if (fieldInstanceIds.size > 0 && fieldInstanceIds.size === targets.length) {
+      this._showFieldTargetSelection(targets, fieldInstanceIds, description, callback);
       return;
     }
 
-    // Standard popup target selection
+    // Fallback: standard popup dialog for non-field targets (landmarks, special objects, etc.)
+    this._showDialogTargetSelection(targets, description, callback);
+  }
+
+  /**
+   * Highlight valid target cards on the field and let the player click them directly.
+   * Shows a floating banner with the prompt and a cancel button.
+   */
+  _showFieldTargetSelection(targets, fieldInstanceIds, description, callback) {
+    let resolved = false;
+
+    // Create a semi-transparent overlay that doesn't block field cards
+    const overlay = document.createElement('div');
+    overlay.className = 'field-target-overlay';
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:150;pointer-events:none';
+
+    // Floating banner with description and cancel
+    const banner = document.createElement('div');
+    banner.className = 'field-target-banner';
+    banner.style.cssText = `
+      position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:201;
+      background:rgba(0,0,0,0.85);border:2px solid #ffd700;border-radius:12px;
+      padding:12px 28px;text-align:center;pointer-events:auto;
+      box-shadow:0 4px 24px rgba(255,215,0,0.3);backdrop-filter:blur(8px);
+      animation:fadeInDown 0.3s ease;
+    `;
+    banner.innerHTML = `
+      <div style="color:#ffd700;font-weight:bold;font-size:1rem;margin-bottom:8px">${description}</div>
+      <div style="color:#ccc;font-size:0.8rem;margin-bottom:10px">Click a highlighted card on the field</div>
+      <button class="menu-btn field-target-cancel" style="padding:6px 20px;font-size:0.8rem;opacity:0.9">✕ Cancel</button>
+    `;
+    document.body.appendChild(overlay);
+    document.body.appendChild(banner);
+
+    // Highlight valid targets on the field
+    const highlightedEls = [];
+    for (const [instanceId] of fieldInstanceIds) {
+      const slotEl = document.querySelector(`.card-slot[data-instance="${instanceId}"]`);
+      if (slotEl) {
+        slotEl.style.outline = '3px solid #ffd700';
+        slotEl.style.outlineOffset = '2px';
+        slotEl.style.boxShadow = '0 0 16px 4px rgba(255,215,0,0.5)';
+        slotEl.style.zIndex = '160';
+        slotEl.style.position = 'relative';
+        slotEl.style.cursor = 'pointer';
+        slotEl.classList.add('target-highlight');
+        highlightedEls.push(slotEl);
+      }
+    }
+
+    const cleanup = () => {
+      overlay.remove();
+      banner.remove();
+      for (const el of highlightedEls) {
+        el.style.outline = '';
+        el.style.outlineOffset = '';
+        el.style.boxShadow = '';
+        el.style.zIndex = '';
+        el.style.cursor = '';
+        el.classList.remove('target-highlight');
+      }
+      // Remove click listeners
+      document.removeEventListener('click', fieldClickHandler, true);
+    };
+
+    // Click handler that intercepts clicks on highlighted field cards
+    const fieldClickHandler = (e) => {
+      if (resolved) return;
+
+      // Walk up from the clicked element to find a card-slot with data-instance
+      let el = e.target;
+      while (el && !el.dataset?.instance) {
+        el = el.parentElement;
+      }
+
+      if (el && fieldInstanceIds.has(el.dataset.instance)) {
+        e.stopPropagation();
+        e.preventDefault();
+        resolved = true;
+        const idx = fieldInstanceIds.get(el.dataset.instance);
+        cleanup();
+        callback(targets[idx]);
+      }
+    };
+
+    // Use capture phase to intercept before normal handlers
+    document.addEventListener('click', fieldClickHandler, true);
+
+    // Cancel button
+    banner.querySelector('.field-target-cancel').onclick = (e) => {
+      e.stopPropagation();
+      if (resolved) return;
+      resolved = true;
+      cleanup();
+      callback(null);
+    };
+  }
+
+  /**
+   * Fallback dialog-based target selection for non-field targets.
+   */
+  _showDialogTargetSelection(targets, description, callback) {
     const options = targets.map((t, i) => ({
       label: t.name || t.card?.name || `Target ${i + 1}`,
       value: i,
@@ -1847,10 +1957,13 @@ export class GameUI {
       const cardId = opt.cardId || (typeof opt.value === 'string' && opt.value.match(/^[A-Z]\d{3}$/) ? opt.value : null);
       if (cardId || targets[i]?.cardId) {
         const cId = cardId || targets[i].cardId;
+        const t = targets[i];
+        const hasStats = t && (t.type === 'Unit' || t.type === 'Token') && t.currentATK !== undefined;
+        const statAttrs = hasStats ? `data-atk="${t.currentATK}" data-def="${t.currentDEF}" data-base-atk="${t.baseATK}" data-base-def="${t.baseDEF}" data-damage="${t.damageTaken || 0}"` : '';
         return `
                 <div class="choice-option" data-idx="${i}" style="display:flex;flex-direction:column;align-items:center;padding:8px;max-width:120px">
                   <img src="./output-web/${cId}.webp" alt="${opt.label}"
-                       class="popup-card-thumb" data-card-id="${cId}"
+                       class="popup-card-thumb" data-card-id="${cId}" ${statAttrs}
                        style="width:80px;height:112px;object-fit:contain;border-radius:6px;margin-bottom:6px;border:1px solid var(--glass-border)" />
                   <span style="font-size:0.7rem;text-align:center">${opt.label}</span>
                 </div>
@@ -1923,6 +2036,15 @@ export class GameUI {
 
     this.app.appendChild(overlay);
 
+    // Click outside dialog to cancel
+    overlay.onclick = (e) => {
+      if (e.target === overlay) {
+        overlay.remove();
+        callback(options[0]);
+      }
+    };
+    overlay.querySelector('.choice-dialog').onclick = (e) => e.stopPropagation();
+
     overlay.querySelectorAll('.choice-option').forEach(el => {
       el.onclick = () => {
         const idx = parseInt(el.dataset.idx);
@@ -1993,14 +2115,17 @@ export class GameUI {
     const chainInfo = chainStack.length > 0
       ? `<div style="display:flex;align-items:center;gap:6px;margin-bottom:10px;flex-wrap:wrap;justify-content:center">
           <span style="color:var(--text-muted);font-size:0.7rem">Chain:</span>
-          ${chainStack.map(c => `
+          ${chainStack.map(c => {
+        const hasStats = c.card.type === 'Unit' || c.card.type === 'Token';
+        const statAttrs = hasStats ? `data-atk="${c.card.currentATK}" data-def="${c.card.currentDEF}" data-base-atk="${c.card.baseATK}" data-base-def="${c.card.baseDEF}" data-damage="${c.card.damageTaken || 0}"` : '';
+        return `
             <div style="display:flex;flex-direction:column;align-items:center;gap:2px">
               <img src="./output-web/${c.card.cardId}.webp" alt="${c.card.name}"
-                   class="popup-card-thumb" data-card-id="${c.card.cardId}"
+                   class="popup-card-thumb" data-card-id="${c.card.cardId}" ${statAttrs}
                    style="width:40px;height:56px;object-fit:cover;border-radius:4px;border:1px solid var(--gold)" />
               <span style="font-size:0.55rem;color:var(--text-secondary);max-width:50px;text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${c.card.name}</span>
             </div>
-          `).join('<span style="color:var(--gold);font-size:0.7rem">→</span>')}
+          `}).join('<span style="color:var(--gold);font-size:0.7rem">→</span>')}
         </div>`
       : '';
 
@@ -2009,12 +2134,15 @@ export class GameUI {
     if (triggerType === 'attack' && triggerContext.attacker) {
       const atkCard = triggerContext.attacker;
       const targetInfo = triggerContext.target;
+      const atkStatAttrs = `data-atk="${atkCard.currentATK}" data-def="${atkCard.currentDEF}" data-base-atk="${atkCard.baseATK}" data-base-def="${atkCard.baseDEF}" data-damage="${atkCard.damageTaken || 0}"`;
       let targetHtml = '';
       if (targetInfo?.type === 'unit' && targetInfo.card) {
+        const tgt = targetInfo.card;
+        const tgtStatAttrs = `data-atk="${tgt.currentATK}" data-def="${tgt.currentDEF}" data-base-atk="${tgt.baseATK}" data-base-def="${tgt.baseDEF}" data-damage="${tgt.damageTaken || 0}"`;
         targetHtml = `
           <div class="attack-context-card">
-            <img src="./output-web/${targetInfo.card.cardId}.webp" alt="${targetInfo.card.name}" />
-            <span>${targetInfo.card.name}</span>
+            <img src="./output-web/${tgt.cardId}.webp" alt="${tgt.name}" class="popup-card-thumb" data-card-id="${tgt.cardId}" ${tgtStatAttrs} />
+            <span>${tgt.name}</span>
           </div>
         `;
       } else if (targetInfo?.type === 'direct') {
@@ -2023,7 +2151,7 @@ export class GameUI {
       attackContextHtml = `
         <div class="attack-context-row">
           <div class="attack-context-card">
-            <img src="./output-web/${atkCard.cardId}.webp" alt="${atkCard.name}" />
+            <img src="./output-web/${atkCard.cardId}.webp" alt="${atkCard.name}" class="popup-card-thumb" data-card-id="${atkCard.cardId}" ${atkStatAttrs} />
             <span>${atkCard.name}</span>
           </div>
           <span class="attack-context-arrow">⚔→</span>
@@ -2063,6 +2191,15 @@ export class GameUI {
     `;
 
     this.app.appendChild(overlay);
+
+    // Click outside dialog to pass
+    overlay.onclick = (e) => {
+      if (e.target === overlay) {
+        overlay.remove();
+        callback({ activate: false });
+      }
+    };
+    overlay.querySelector('.response-card-dialog').onclick = (e) => e.stopPropagation();
 
     // Pass button
     overlay.querySelector('.resp-pass-btn').onclick = () => {
@@ -2847,22 +2984,51 @@ export class GameUI {
         const src = img.src;
         if (!src) return;
 
+        // Build stat tokens HTML if card has stat data
+        let statHtml = '';
+        if (img.dataset.atk !== undefined && img.dataset.atk !== '') {
+          const atk = parseInt(img.dataset.atk);
+          const def = parseInt(img.dataset.def);
+          const baseAtk = parseInt(img.dataset.baseAtk);
+          const baseDef = parseInt(img.dataset.baseDef);
+          const damage = parseInt(img.dataset.damage || '0');
+          const remainingDef = def - damage;
+
+          const atkColor = atk > baseAtk ? '#4cff4c' : atk < baseAtk ? '#ff4c4c' : '#fff';
+          const defColor = remainingDef > baseDef ? '#4cff4c' : remainingDef < baseDef ? '#ff4c4c' : '#fff';
+
+          statHtml = `
+            <div style="display:flex;justify-content:space-between;width:200px;margin-top:6px;gap:4px">
+              <div style="flex:1;background:rgba(255,60,60,0.2);border:1px solid rgba(255,60,60,0.4);border-radius:6px;padding:4px 8px;text-align:center;font-size:0.8rem;font-weight:bold;color:${atkColor}">
+                ⚔ ${atk}${atk !== baseAtk ? ` <span style="font-size:0.65rem;opacity:0.6">(${baseAtk})</span>` : ''}
+              </div>
+              <div style="flex:1;background:rgba(60,120,255,0.2);border:1px solid rgba(60,120,255,0.4);border-radius:6px;padding:4px 8px;text-align:center;font-size:0.8rem;font-weight:bold;color:${defColor}">
+                🛡 ${remainingDef}${remainingDef !== baseDef ? ` <span style="font-size:0.65rem;opacity:0.6">(${baseDef})</span>` : ''}
+              </div>
+            </div>
+          `;
+        }
+
         preview = document.createElement('div');
         preview.className = 'popup-hover-preview';
-        preview.innerHTML = `<img src="${src}" alt="${cardId}" style="width:200px;height:auto;border-radius:var(--radius-card);box-shadow:0 8px 32px rgba(0,0,0,0.8),0 0 30px rgba(255,213,79,0.15)" />`;
+        preview.innerHTML = `
+          <img src="${src}" alt="${cardId}" style="width:200px;height:auto;border-radius:var(--radius-card);box-shadow:0 8px 32px rgba(0,0,0,0.8),0 0 30px rgba(255,213,79,0.15)" />
+          ${statHtml}
+        `;
         preview.style.cssText = 'position:fixed;z-index:9999;pointer-events:none;';
         document.body.appendChild(preview);
 
         // Position the preview
         const rect = img.getBoundingClientRect();
-        const previewW = 210;
+        const previewW = 220;
         let left = rect.right + 12;
         if (left + previewW > window.innerWidth) {
           left = rect.left - previewW - 12;
         }
         let top = rect.top;
-        if (top + 300 > window.innerHeight) {
-          top = window.innerHeight - 310;
+        const previewH = statHtml ? 340 : 300;
+        if (top + previewH > window.innerHeight) {
+          top = window.innerHeight - previewH - 10;
         }
         preview.style.left = `${left}px`;
         preview.style.top = `${top}px`;

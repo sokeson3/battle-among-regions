@@ -938,6 +938,7 @@ export function register(effectEngine, cardDB) {
             description: 'Negate and destroy enemy Spell/Trap',
             condition: (gs, ctx) => ctx.caster?.id !== ctx.sourcePlayer.id,
             execute: (gs, ctx, ee) => {
+                gs._chainNegate = true;
                 gs.log('TRAP', 'Spirit Backlash negates the Spell/Trap!');
             },
         }),

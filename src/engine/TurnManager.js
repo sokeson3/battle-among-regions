@@ -324,6 +324,8 @@ export class TurnManager {
                         if (adjacent.length === 1) {
                             chosen = adjacent[0];
                         } else {
+                            // Set source player so AI routing works correctly
+                            this.effectEngine._currentSourcePlayerId = player.id;
                             chosen = await this.effectEngine.requestTarget(
                                 adjacent,
                                 'Aurora Sentinel: Choose an adjacent friendly unit to grant +100 DEF'
@@ -372,6 +374,11 @@ export class TurnManager {
                 delete p._sealExpiresRound;
                 gs.log('EFFECT', `${p.name}'s Seal protection has expired.`);
             }
+        }
+
+        // E027: Double Cast — clear unused double-cast flag at end of turn
+        for (const p of gs.players) {
+            p._doubleCastActive = false;
         }
 
         // Clear temporary effects

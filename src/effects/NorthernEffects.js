@@ -29,6 +29,22 @@ export function register(effectEngine, cardDB) {
         }),
         createEffect({
             cardId: 'N001',
+            trigger: EFFECT_EVENTS.ON_SUMMON,
+            description: 'Unit summoned in DEF position gains +200 DEF',
+            condition: (gs, ctx) => {
+                const owner = gs.getPlayerById(ctx.source?.ownerId);
+                return owner?.landmarkZone?.cardId === 'N001' &&
+                    !owner.landmarkZone.silenced &&
+                    ctx.source?.position === 'DEF' &&
+                    !ctx.source._n001Applied;
+            },
+            execute: (gs, ctx, ee) => {
+                ee.applyPermStatMod(ctx.source, 0, 200, 'Frostfell Citadel');
+                ctx.source._n001Applied = true;
+            },
+        }),
+        createEffect({
+            cardId: 'N001',
             trigger: EFFECT_EVENTS.ON_POSITION_CHANGE,
             description: 'Unit switched to DEF gains +200 DEF',
             condition: (gs, ctx) => {
@@ -661,8 +677,8 @@ export function register(effectEngine, cardDB) {
             description: 'Negate a Spell or Trap effect',
             condition: (gs, ctx) => ctx.caster && ctx.caster.id !== ctx.sourcePlayer.id,
             execute: (gs, ctx, ee) => {
+                gs._chainNegate = true;
                 gs.log('TRAP', `Ice Mirror negates ${ctx.spell?.name || 'the Spell/Trap'}!`);
-                // The negation is handled by preventing effect execution
             },
         }),
     ]);

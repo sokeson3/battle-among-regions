@@ -127,8 +127,11 @@ export class GameController {
             });
         }
 
-        // Trigger "When Summoned" effects
+        // Trigger "When Summoned" effects (card's own effects)
         await this.effectEngine.triggerOnSummon(card, player);
+
+        // Trigger landmark reactions to summon (e.g. N001 Frostfell Citadel +200 DEF for DEF summon)
+        await this.effectEngine.triggerLandmarkOnSummon(card, player);
 
         // Trigger opponent trap checks
         await this.effectEngine.trigger(EFFECT_EVENTS.ON_OPPONENT_SUMMON, {
@@ -178,7 +181,7 @@ export class GameController {
 
         player.spellsPlayedThisTurn++;
 
-        // Trigger spell effects (including E002 Scroll Library negate/copy)
+        // Trigger auto-trigger effects (E002 Scroll Library negate/copy)
         await this.effectEngine.trigger(EFFECT_EVENTS.ON_SPELL_ACTIVATE, {
             spell: card,
             caster: player,
@@ -186,12 +189,23 @@ export class GameController {
 
         this._notifyUI(); // Show the spell on field
 
-        // Check if spell was negated (E002 Scroll Library)
+        // Check if spell was negated by auto-trigger (E002 Scroll Library)
         if (this.gameState._scrollLibraryNegate) {
             this.gameState._scrollLibraryNegate = false;
-            // Remove spell from field slot
             if (spellSlot >= 0) player.spellTrapZone[spellSlot] = null;
-            // Send to graveyard without executing
+            player.graveyard.push(card);
+            this.gameState.log('SPELL', `${card.name} was negated!`);
+            this._notifyUI();
+            return { success: true, card, negated: true };
+        }
+
+        // Ask opponents to respond BEFORE execution (N046 Ice Mirror can negate here)
+        await this._askOpponentResponse('spell', { spell: card, caster: player });
+
+        // Check if spell was negated by chain response (N046 Ice Mirror)
+        if (this.gameState._chainNegate) {
+            this.gameState._chainNegate = false;
+            if (spellSlot >= 0) player.spellTrapZone[spellSlot] = null;
             player.graveyard.push(card);
             this.gameState.log('SPELL', `${card.name} was negated!`);
             this._notifyUI();
@@ -207,6 +221,17 @@ export class GameController {
                 if (result && result.cancelled) {
                     cancelled = true;
                     break;
+                }
+            }
+        }
+
+        // Double Cast (E027) — if active, copy the spell by executing its effects again
+        if (!cancelled && player._doubleCastActive && card.cardId !== 'E027') {
+            player._doubleCastActive = false;
+            this.gameState.log('EFFECT', `Double Cast copies ${card.name}!`);
+            for (const effect of effects) {
+                if (effect.trigger === EFFECT_EVENTS.ON_SPELL_ACTIVATE || effect.trigger === 'SELF') {
+                    await this.effectEngine._resolveEffect(effect, { source: card, sourcePlayer: player });
                 }
             }
         }
@@ -239,9 +264,6 @@ export class GameController {
             spell: card,
             caster: player,
         });
-
-        // Ask players if they want to respond
-        await this._askOpponentResponse('spell', { spell: card, caster: player });
 
         this._notifyUI();
         return { success: true, card };
@@ -406,16 +428,28 @@ export class GameController {
 
         player.spellsPlayedThisTurn++;
 
-        // Trigger spell effects (including E002 Scroll Library negate/copy)
+        // Trigger auto-trigger effects (E002 Scroll Library negate/copy)
         await this.effectEngine.trigger(EFFECT_EVENTS.ON_SPELL_ACTIVATE, {
             spell: card,
             caster: player,
         });
 
-        // Check if spell was negated (E002 Scroll Library)
+        // Check if spell was negated by auto-trigger (E002 Scroll Library)
         if (this.gameState._scrollLibraryNegate) {
             this.gameState._scrollLibraryNegate = false;
-            // Remove from zone and send to graveyard without executing
+            player.spellTrapZone[slotIndex] = null;
+            player.graveyard.push(card);
+            this.gameState.log('SPELL', `${card.name} was negated!`);
+            this._notifyUI();
+            return { success: true, card, negated: true };
+        }
+
+        // Ask opponents to respond BEFORE execution (N046 Ice Mirror can negate here)
+        await this._askOpponentResponse('spell', { spell: card, caster: player });
+
+        // Check if spell was negated by chain response (N046 Ice Mirror)
+        if (this.gameState._chainNegate) {
+            this.gameState._chainNegate = false;
             player.spellTrapZone[slotIndex] = null;
             player.graveyard.push(card);
             this.gameState.log('SPELL', `${card.name} was negated!`);
@@ -432,6 +466,17 @@ export class GameController {
                 if (result && result.cancelled) {
                     cancelled = true;
                     break;
+                }
+            }
+        }
+
+        // Double Cast (E027) — if active, copy the spell by executing its effects again
+        if (!cancelled && player._doubleCastActive && card.cardId !== 'E027') {
+            player._doubleCastActive = false;
+            this.gameState.log('EFFECT', `Double Cast copies ${card.name}!`);
+            for (const effect of effects) {
+                if (effect.trigger === EFFECT_EVENTS.ON_SPELL_ACTIVATE || effect.trigger === 'SELF') {
+                    await this.effectEngine._resolveEffect(effect, { source: card, sourcePlayer: player });
                 }
             }
         }
@@ -460,9 +505,6 @@ export class GameController {
             spell: card,
             caster: player,
         });
-
-        // Ask players if they want to respond
-        await this._askOpponentResponse('spell', { spell: card, caster: player });
 
         this._notifyUI();
         return { success: true, card };
@@ -666,15 +708,13 @@ export class GameController {
         const activeId = gs.activePlayerIndex;
         const chainStack = [];
 
-        // Both opponents AND the active player can respond (active player goes last in order)
+        // Start with opponents only — active player joins the rotation after an opponent chains
         const playerOrder = [];
         for (const player of gs.players) {
             if (player.id !== activeId && player.isAlive) playerOrder.push(player);
         }
-        // Active player can also chain their set spells/traps in response
-        const activePlayer = gs.getActivePlayer();
-        if (activePlayer.isAlive) playerOrder.push(activePlayer);
         if (playerOrder.length === 0) return;
+        let activePlayerIncluded = false;
 
         let consecutivePasses = 0;
         let currentPlayerIdx = 0;
@@ -737,6 +777,25 @@ export class GameController {
 
                     chainStack.push({ playerId: player.id, cardInstanceId: response.cardInstanceId, card, slotIndex });
                     consecutivePasses = 0; // Reset passes — other player can now respond
+
+                    // Update effective trigger so traps like N046 can counter-chain
+                    // e.g. if a Spell was chained, next response should use 'spell' trigger
+                    if (card.type === 'Spell') {
+                        triggerType = 'spell';
+                        triggerContext = { spell: card, caster: player };
+                    } else if (card.type === 'Trap') {
+                        triggerType = 'spell';
+                        triggerContext = { spell: card, caster: player };
+                    }
+
+                    // After an opponent chains, add the active player to the rotation so they can counter-chain
+                    if (!activePlayerIncluded && player.id !== activeId) {
+                        const activePlayer2 = gs.getActivePlayer();
+                        if (activePlayer2.isAlive) {
+                            playerOrder.push(activePlayer2);
+                            activePlayerIncluded = true;
+                        }
+                    }
                 } else {
                     consecutivePasses++;
                 }

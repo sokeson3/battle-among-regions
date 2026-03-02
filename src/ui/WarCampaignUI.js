@@ -163,6 +163,24 @@ export class WarCampaignUI {
       regionPools[region] = buildRegionPool(region);
     }
 
+    // Remove copies of cards already in each player's deck from pools
+    const existingCounts = {};
+    for (const p of this.state.players) {
+      for (const cardId of p.deck) {
+        existingCounts[cardId] = (existingCounts[cardId] || 0) + 1;
+      }
+    }
+    const removedCounts = {};
+    for (const region of allRegions) {
+      regionPools[region] = regionPools[region].filter(c => {
+        if (existingCounts[c.id] && (!removedCounts[c.id] || removedCounts[c.id] < existingCounts[c.id])) {
+          removedCounts[c.id] = (removedCounts[c.id] || 0) + 1;
+          return false;
+        }
+        return true;
+      });
+    }
+
     // ── Build the pass order for each player ──
     // passSlots: array of "seats" around the table, each containing { owner, pool }
     // Players sit at indices 0..playerCount-1, and non-chosen regions fill remaining "seats"

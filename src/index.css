@@ -7265,6 +7265,39 @@ body {
   }
 }
 
+/* ─── Field Target Selection ────────────────────────── */
+
+@keyframes fadeInDown {
+  0% {
+    opacity: 0;
+    transform: translateX(-50%) translateY(-20px);
+  }
+
+  100% {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+}
+
+.card-slot.target-highlight {
+  animation: field-target-pulse 1s ease-in-out infinite !important;
+  cursor: pointer !important;
+}
+
+@keyframes field-target-pulse {
+
+  0%,
+  100% {
+    outline-color: rgba(255, 215, 0, 0.6);
+    box-shadow: 0 0 12px 3px rgba(255, 215, 0, 0.3);
+  }
+
+  50% {
+    outline-color: rgba(255, 215, 0, 1);
+    box-shadow: 0 0 24px 6px rgba(255, 215, 0, 0.6);
+  }
+}
+
 /* ─── Popup Card Hover Preview ──────────────────────── */
 
 .popup-card-thumb {
