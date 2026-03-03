@@ -8,7 +8,7 @@ import * as SouthernEffects from './src/effects/SouthernEffects.js';
 import * as WesternEffects from './src/effects/WesternEffects.js';
 
 async function test() {
-    const csvRules = fs.readFileSync('./card_dataV4.2.csv', 'utf8');
+    const csvRules = fs.readFileSync('./card_dataV4.3.csv', 'utf8');
     const controller = new GameController();
     await controller.loadCards(csvRules);
     controller.registerEffects([NorthernEffects, EasternEffects, SouthernEffects, WesternEffects]);

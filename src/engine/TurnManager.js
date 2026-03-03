@@ -33,10 +33,10 @@ export class TurnManager {
             this.effectEngine.shuffleDeck(player.id);
         }
 
-        // Starting player draws 5, second player draws 6
+        // Both players draw 5 cards
         for (let i = 0; i < gs.players.length; i++) {
             const playerIdx = (gs.startingPlayerIndex + i) % gs.players.length;
-            const drawCount = i === 0 ? 5 : 6;
+            const drawCount = 5;
             this.effectEngine.drawCards(playerIdx, drawCount);
         }
 
@@ -157,9 +157,10 @@ export class TurnManager {
                 for (const unit of player.getFieldUnits()) {
                     unit.activatedThisRound = false;
                 }
-                // Reset landmark once-per-round flags (E002 Scroll Library)
+                // Reset landmark once-per-round flags (E002 Scroll Library, W001 Echoing Canyon)
                 if (player.landmarkZone) {
                     player.landmarkZone._scrollLibraryUsed = false;
+                    player.landmarkZone._echoUsedThisRound = false;
                 }
             }
         }

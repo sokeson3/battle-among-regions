@@ -147,10 +147,12 @@ export class EffectEngine {
                 const context = { source: cardInstance, sourcePlayer: player, summonedCard: cardInstance };
                 if (!effect.condition || effect.condition(this.gameState, context)) {
 
-                    // Check for Echoing Canyon (W001) - trigger "When Summoned" twice
+                    // Check for Echoing Canyon (W001) - trigger "When Summoned" twice (once per round)
                     let triggerCount = 1;
-                    if (player.landmarkZone && player.landmarkZone.cardId === 'W001' && !player.landmarkZone.silenced) {
+                    if (player.landmarkZone && player.landmarkZone.cardId === 'W001' && !player.landmarkZone.silenced
+                        && !player.landmarkZone._echoUsedThisRound) {
                         triggerCount = 2;
+                        player.landmarkZone._echoUsedThisRound = true;
                         this.gameState.log('EFFECT', `Echoing Canyon doubles the "When Summoned" effect!`);
                     }
 

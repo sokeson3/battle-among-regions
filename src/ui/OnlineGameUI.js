@@ -5,7 +5,6 @@
 
 import { NetworkManager } from '../online/NetworkManager.js';
 import * as SharedUI from './SharedUI.js';
-import { OnlineWarCampaignUI } from './OnlineWarCampaignUI.js';
 import * as MatchHistory from '../online/MatchHistory.js';
 
 export class OnlineGameUI {
@@ -48,8 +47,9 @@ export class OnlineGameUI {
         try {
             await this.net.connect(url);
             this._wireNetworkEvents();
-            // Wire war campaign events
+            // Wire war campaign events (passes net reference to warUI)
             if (this.warUI) {
+                this.warUI.net = this.net;
                 this.warUI.wireWarEvents();
             }
             return true;
@@ -68,6 +68,7 @@ export class OnlineGameUI {
         });
 
         this.net.on('MATCH_FOUND', (msg) => {
+            this._updateJoiningStatus('✅ Match found! Loading game...');
             this._showMatchFound(msg.yourRegion, msg.opponentName, msg.opponentRegion);
             // Hand off in-game rendering to GameUI
             this.gameUI.startOnlineGame(this.net, this.myPlayerId);
@@ -80,6 +81,15 @@ export class OnlineGameUI {
         this.net.on('ROOM_CREATED', (msg) => {
             this.roomCode = msg.roomCode;
             this._showWaitingForOpponent();
+        });
+
+        this.net.on('ERROR', (msg) => {
+            this._showToast(msg.message || 'An error occurred.');
+            // If we were on a joining screen, go back to the join form
+            const joiningEl = document.querySelector('.joining-status');
+            if (joiningEl) {
+                this._showJoinRoom();
+            }
         });
     }
 
@@ -107,7 +117,7 @@ export class OnlineGameUI {
         document.getElementById('btn-private-match').onclick = () => this._showPrivateMatch();
         document.getElementById('btn-war-campaign').onclick = () => {
             if (this.warUI) {
-                this.warUI.show();
+                this.warUI.showOnline(this);
             }
         };
         document.getElementById('btn-match-history').onclick = () => this._showMatchHistory();
@@ -251,9 +261,46 @@ export class OnlineGameUI {
             }
 
             this.net.joinRoom(code, name);
+            this._showJoining(code);
         };
 
         document.getElementById('btn-lobby-back').onclick = () => this._showPrivateMatch();
+    }
+
+    _showJoining(roomCode) {
+        this.app.innerHTML = `
+            <div class="main-menu online-lobby">
+                <h1 class="menu-title">🔗 Joining Room</h1>
+                <div class="room-code-display">
+                    <div class="room-code-big">${roomCode}</div>
+                </div>
+                <div class="waiting-animation">
+                    <div class="waiting-dots">
+                        <span></span><span></span><span></span>
+                    </div>
+                    <p>Connecting to room...</p>
+                </div>
+                <div class="joining-status" id="joining-status" style="margin-top:12px;font-size:0.85rem;color:var(--text-muted);text-align:center;max-height:120px;overflow-y:auto">
+                    <div>⏳ Sending join request...</div>
+                </div>
+                <button class="menu-btn" id="btn-cancel-join" style="margin-top:16px">Cancel</button>
+            </div>
+        `;
+
+        document.getElementById('btn-cancel-join').onclick = () => {
+            this.net.disconnect();
+            this.gameUI.showMenu();
+        };
+    }
+
+    _updateJoiningStatus(message) {
+        const el = document.getElementById('joining-status');
+        if (el) {
+            const line = document.createElement('div');
+            line.textContent = message;
+            el.appendChild(line);
+            el.scrollTop = el.scrollHeight;
+        }
     }
 
     _showWaitingForOpponent() {

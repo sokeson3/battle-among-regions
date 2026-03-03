@@ -61,6 +61,8 @@ export class ManaSystem {
     _getExtraMana(player) {
         let extra = 0;
 
+        console.log(`[ManaSystem] Checking extra mana for ${player.name}, landmark: ${player.landmarkZone?.cardId || 'none'}, silenced: ${player.landmarkZone?.silenced}`);
+
         // Check player's own Landmark
         if (player.landmarkZone && !player.landmarkZone.silenced) {
             const lm = player.landmarkZone;

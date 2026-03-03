@@ -10,14 +10,13 @@ import { WarCampaignUI } from './ui/WarCampaignUI.js';
 import { DuelDeckBuilderUI } from './ui/DuelDeckBuilderUI.js';
 import { TutorialUI } from './ui/TutorialUI.js';
 import { OnlineGameUI } from './ui/OnlineGameUI.js';
-import { OnlineWarCampaignUI } from './ui/OnlineWarCampaignUI.js';
 import * as NorthernEffects from './effects/NorthernEffects.js';
 import * as EasternEffects from './effects/EasternEffects.js';
 import * as WesternEffects from './effects/WesternEffects.js';
 import * as SouthernEffects from './effects/SouthernEffects.js';
 
 // Card data CSV path — loaded from the project root
-const CSV_URL = './card_dataV4.2.csv';
+const CSV_URL = './card_dataV4.3.csv';
 
 async function init() {
     console.log('🎴 Battle Among Regions — Initializing...');
@@ -40,7 +39,7 @@ async function init() {
           <h1 style="font-size:2rem;margin-bottom:16px">Failed to Load Card Data</h1>
           <p style="color:#8b92a8">${err.message}</p>
           <p style="color:#525a72;margin-top:12px;font-size:0.8rem">
-            Make sure card_dataV4.2.csv is in the project root directory.
+            Make sure card_dataV4.3.csv is in the project root directory.
           </p>
         </div>
       </div>
@@ -115,15 +114,14 @@ async function init() {
         () => ui.showMenu()
     );
     const onlineUI = new OnlineGameUI(ui, controller);
-    const onlineWarUI = new OnlineWarCampaignUI(ui, controller, onlineUI);
-    onlineUI.warUI = onlineWarUI;
+    // Wire war campaign for online mode
+    onlineUI.warUI = warCampaignUI;
 
     ui.campaignUI = campaignUI;
     ui.warCampaignUI = warCampaignUI;
     ui.tutorialUI = tutorialUI;
     ui.deckBuilderUI = deckBuilderUI;
     ui.onlineUI = onlineUI;
-    ui.onlineWarUI = onlineWarUI;
 
     ui.showMenu();
 

@@ -13,6 +13,7 @@ import { readFileSync, appendFileSync, existsSync } from 'fs';
 // Import game engine
 import { GameController } from '../src/engine/GameController.js';
 import { WAR_ROUNDS_2P } from '../src/campaign/WarCampaignData.js';
+import { BotPlayer } from './BotPlayer.js';
 import * as NorthernEffects from '../src/effects/NorthernEffects.js';
 import * as EasternEffects from '../src/effects/EasternEffects.js';
 import * as WesternEffects from '../src/effects/WesternEffects.js';
@@ -169,6 +170,7 @@ class RoomManager {
 class WarRoomManager {
     constructor() {
         this.rooms = new Map(); // roomCode -> WarRoom
+        this.warMatchQueue = []; // [{ ws, name }] — players waiting for a war campaign match
     }
 
     generateCode() {
@@ -223,10 +225,14 @@ class WarRoomManager {
         const roundDef = this.getRoundDef(warRoom);
         for (const p of warRoom.players) {
             const opp = warRoom.players.find(o => o.id !== p.id);
-            // Mirror seat order so each player gets a different non-chosen region as seat 1
-            const seatOrder = p.id === 0
-                ? [p.region, shuffledNonChosen[0], opp.region, shuffledNonChosen[1]]
-                : [p.region, shuffledNonChosen[1], opp.region, shuffledNonChosen[0]];
+            // Each player drafts from their main + one non-chosen region
+            // Then they swap and draft from the opponent's main + other non-chosen
+            const myPools = p.id === 0
+                ? [p.region, shuffledNonChosen[0]]
+                : [p.region, shuffledNonChosen[1]];
+            const oppPools = p.id === 0
+                ? [opp.region, shuffledNonChosen[1]]
+                : [opp.region, shuffledNonChosen[0]];
             this.send(p.ws, 'WAR_DRAFT_START', {
                 yourRegion: p.region,
                 opponentRegion: opp.region,
@@ -234,7 +240,8 @@ class WarRoomManager {
                 round: warRoom.currentRound,
                 roundDef,
                 standings: this.getStandings(warRoom),
-                seatOrder,
+                myPools,
+                oppPools,
             });
         }
         console.log(`⚔ War room ${code}: ${warRoom.players[0].name} (${shuffled[0]}) vs ${warRoom.players[1].name} (${shuffled[1]}), non-chosen: [${shuffledNonChosen}]`);
@@ -245,18 +252,30 @@ class WarRoomManager {
         const player = warRoom.players.find(p => p.ws === ws);
         if (!player) return;
 
+        const opp = warRoom.players.find(p => p.id !== player.id);
+
+        // If the opponent is already done drafting, auto-respond immediately
+        if (opp && opp.draftDone) {
+            this.send(ws, 'WAR_DRAFT_CONTINUE', {
+                pool1Ids: pool1Ids,
+                pool2Ids: pool2Ids,
+                extraPools: extraPools,
+                opponentDone: true,
+            });
+            return;
+        }
+
         warRoom.draftSyncData[player.id] = { pool1Ids, pool2Ids, extraPools };
-        this.send(ws, 'GAME_PHASE', { phase: 'WAITING', message: 'Waiting for opponent to finish drafting first pools...' });
 
         // When both players have synced, exchange pools
         if (Object.keys(warRoom.draftSyncData).length >= 2) {
             for (const p of warRoom.players) {
-                const opp = warRoom.players.find(o => o.id !== p.id);
-                const oppSync = warRoom.draftSyncData[opp.id];
+                const o = warRoom.players.find(x => x.id !== p.id);
+                const oSync = warRoom.draftSyncData[o.id];
                 this.send(p.ws, 'WAR_DRAFT_CONTINUE', {
-                    pool1Ids: oppSync.pool1Ids,
-                    pool2Ids: oppSync.pool2Ids,
-                    extraPools: oppSync.extraPools,
+                    pool1Ids: oSync.pool1Ids,
+                    pool2Ids: oSync.pool2Ids,
+                    extraPools: oSync.extraPools,
                 });
             }
             warRoom.draftSyncData = {};
@@ -267,13 +286,39 @@ class WarRoomManager {
         const player = warRoom.players.find(p => p.ws === ws);
         if (!player) return;
         player.deck = cardIds;
-        warRoom.deckReadyCount++;
+        player.draftDone = true;
+        console.log(`⚔ War deck stored: Player ${player.id} (${player.region}), ${cardIds.length} cards`);
+
+        // If the opponent has a pending draft sync waiting, auto-resolve it
+        const opp = warRoom.players.find(p => p.id !== player.id);
+        if (opp && warRoom.draftSyncData[opp.id] && !warRoom.draftSyncData[player.id]) {
+            const oppSync = warRoom.draftSyncData[opp.id];
+            this.send(opp.ws, 'WAR_DRAFT_CONTINUE', {
+                pool1Ids: oppSync.pool1Ids,
+                pool2Ids: oppSync.pool2Ids,
+                extraPools: oppSync.extraPools,
+                opponentDone: true,
+            });
+            warRoom.draftSyncData = {};
+        }
 
         this.send(ws, 'GAME_PHASE', { phase: 'WAITING', message: 'Waiting for opponent to finish drafting...' });
+    }
 
-        if (warRoom.deckReadyCount >= 2) {
-            warRoom.deckReadyCount = 0;
+    handleReadyCheck(warRoom, ws) {
+        const player = warRoom.players.find(p => p.ws === ws);
+        if (!player) return false;
+
+        warRoom.readyCheckCount = (warRoom.readyCheckCount || 0) + 1;
+        console.log(`✅ War ready check: Player ${player.id} (${warRoom.readyCheckCount}/2)`);
+
+        if (warRoom.readyCheckCount >= 2) {
+            warRoom.readyCheckCount = 0;
             warRoom.phase = 'PLAYING';
+            // Tell both clients to wire game event handlers
+            for (const p of warRoom.players) {
+                this.send(p.ws, 'WAR_GAME_STARTING', { yourPlayerId: p.id });
+            }
             return true; // signal to start the round
         }
         return false;
@@ -288,13 +333,18 @@ class WarRoomManager {
             warRoom.currentRound++;
             warRoom.phase = 'DECK_BUILD';
             warRoom.draftSyncData = {};
+            warRoom.readyCheckCount = 0;
+            for (const p of warRoom.players) p.draftDone = false;
             const roundDef = this.getRoundDef(warRoom);
             const nc = warRoom.nonChosenRegions || [];
             for (const p of warRoom.players) {
                 const opp = warRoom.players.find(o => o.id !== p.id);
-                const seatOrder = p.id === 0
-                    ? [p.region, nc[0], opp.region, nc[1]]
-                    : [p.region, nc[1], opp.region, nc[0]];
+                const myPools = p.id === 0
+                    ? [p.region, nc[0]]
+                    : [p.region, nc[1]];
+                const oppPools = p.id === 0
+                    ? [opp.region, nc[1]]
+                    : [opp.region, nc[0]];
                 this.send(p.ws, 'WAR_DRAFT_START', {
                     yourRegion: p.region,
                     opponentRegion: opp.region,
@@ -303,7 +353,8 @@ class WarRoomManager {
                     roundDef,
                     standings: this.getStandings(warRoom),
                     previousDeck: p.deck,
-                    seatOrder,
+                    myPools,
+                    oppPools,
                 });
             }
             return true;
@@ -387,6 +438,28 @@ class WarRoomManager {
         return null;
     }
 
+    // ─── War Matchmaking Queue ────────────────────────────────
+
+    addToWarQueue(ws, name) {
+        this.removeFromWarQueue(ws);
+        this.warMatchQueue.push({ ws, name });
+    }
+
+    removeFromWarQueue(ws) {
+        this.warMatchQueue = this.warMatchQueue.filter(p => p.ws !== ws);
+    }
+
+    tryWarMatchFromQueue() {
+        if (this.warMatchQueue.length < 2) return null;
+
+        const p1 = this.warMatchQueue.shift();
+        const p2 = this.warMatchQueue.shift();
+
+        const warRoom = this.createWarRoom(p1.ws, p1.name);
+        const result = this.joinWarRoom(warRoom.code, p2.ws, p2.name);
+        return result.warRoom || null;
+    }
+
     send(ws, type, data = {}) {
         if (ws.readyState === 1) {
             ws.send(JSON.stringify({ type, ...data }));
@@ -426,32 +499,10 @@ function sanitizeStateForPlayer(gameState, playerId) {
 
 function serializeCard(card) {
     if (!card) return null;
-    return {
-        instanceId: card.instanceId,
-        cardId: card.cardId,
-        name: card.name,
-        type: card.type,
-        region: card.region,
-        manaCost: card.manaCost,
-        baseATK: card.baseATK,
-        baseDEF: card.baseDEF,
-        currentATK: card.currentATK,
-        currentDEF: card.currentDEF,
-        damageTaken: card.damageTaken,
-        position: card.position,
-        faceUp: card.faceUp,
-        description: card.description,
-        keywords: card.keywords,
-        atkModifiers: card.atkModifiers,
-        defModifiers: card.defModifiers,
-        silenced: card.silenced,
-        summonedThisTurn: card.summonedThisTurn,
-        hasAttackedThisTurn: card.hasAttackedThisTurn,
-        hasChangedPositionThisTurn: card.hasChangedPositionThisTurn,
-        activatedThisRound: card.activatedThisRound,
-        activatedThisTurn: card.activatedThisTurn,
-        ownerId: card.ownerId,
-    };
+    // Spread all card properties automatically so new fields are never missed.
+    // Only strip internal/non-serializable properties if needed.
+    const { _listeners, _internalRef, ...rest } = card;
+    return rest;
 }
 
 // ─── Game State Broadcasting ─────────────────────────────────
@@ -480,6 +531,13 @@ async function startGame(room, roomMgr, csvText) {
         const activeP = room.players.find(p => p.id === activeId);
         if (!activeP) { cb(targets[0]); return; }
 
+        // Bot auto-resolves targets
+        if (activeP.isBot && room.botPlayer) {
+            const chosen = room.botPlayer.chooseTarget(targets, desc);
+            setTimeout(() => cb(chosen || targets[0]), 100);
+            return;
+        }
+
         // Store callback for when client responds
         room.pendingTargetCb = cb;
         room.pendingTargetPlayerId = activeId;
@@ -498,23 +556,59 @@ async function startGame(room, roomMgr, csvText) {
         const activeP = room.players.find(p => p.id === activeId);
         if (!activeP) { cb(options[0]); return; }
 
+        // Bot auto-resolves choices
+        if (activeP.isBot && room.botPlayer) {
+            const chosen = room.botPlayer.chooseOption(options, desc);
+            setTimeout(() => cb(chosen || options[0]), 100);
+            return;
+        }
+
         room.pendingChoiceCb = cb;
         room.pendingChoicePlayerId = activeId;
         roomMgr.send(activeP.ws, 'REQUEST_CHOICE', { options, description: desc });
     };
 
-    controller.onOpponentResponse = (player, cb) => {
+    controller.onOpponentResponse = (player, cb, chainContext) => {
         const p = room.players.find(rp => rp.id === player.id);
         if (!p) { cb({ activate: false }); return; }
 
-        const faceDownCards = player.getFaceDownCards().filter(c => c.type === 'Spell' || c.type === 'Trap');
+        // Bot never activates response traps (simple AI — always passes)
+        if (p.isBot) {
+            setTimeout(() => cb({ activate: false }), 50);
+            return;
+        }
+
+        const faceDownCards = player.getFaceDownCards().filter(c =>
+            (c.type === 'Spell' || c.type === 'Trap') && !c.setThisTurn
+        );
         if (faceDownCards.length === 0) { cb({ activate: false }); return; }
+
+        // Validate each card and annotate with canActivate/reason
+        const validator = controller.actionValidator;
+        const effectEngine = controller.effectEngine;
+        const annotated = faceDownCards.map(card => {
+            let canActivate = false;
+            let reason = '';
+            if (card.type === 'Trap') {
+                const result = validator.canActivateTrap(player.id, card, {
+                    effectEngine,
+                    triggerContext: chainContext?.triggerContext,
+                    triggerType: chainContext?.triggerType
+                });
+                canActivate = result.valid;
+                reason = result.reason || '';
+            } else if (card.type === 'Spell') {
+                const result = validator.canActivateSetSpell(player.id, card, { isResponse: true });
+                canActivate = result.valid;
+                reason = result.reason || '';
+            }
+            return { ...serializeCard(card), canActivate, reason };
+        });
+        console.log(`🎴 Response: P${player.id} has ${faceDownCards.length} face-down, ${annotated.filter(c => c.canActivate).length} activatable (trigger: ${chainContext?.triggerType})`);
 
         room.pendingResponseCb = cb;
         room.pendingResponsePlayerId = player.id;
-
-        const serialized = faceDownCards.map(c => serializeCard(c));
-        roomMgr.send(p.ws, 'REQUEST_RESPONSE', { faceDownCards: serialized });
+        roomMgr.send(p.ws, 'REQUEST_RESPONSE', { faceDownCards: annotated, triggerType: chainContext?.triggerType });
     };
 
     controller.onUIUpdate = () => {
@@ -543,14 +637,18 @@ async function startGame(room, roomMgr, csvText) {
     for (const p of room.players) {
         const player = controller.gameState.getPlayerById(p.id);
         const seenCardIds = new Set();
-        const landmarks = player.deck.filter(c => {
+        const allCards = [...player.deck, ...player.hand];
+        const landmarks = allCards.filter(c => {
             if (c.type !== 'Landmark') return false;
             if (seenCardIds.has(c.cardId)) return false;
             seenCardIds.add(c.cardId);
             return true;
         });
 
-        if (landmarks.length === 0) {
+        if (p.isBot && room.botPlayer) {
+            // Bot auto-selects landmark
+            room.landmarkSelections[p.id] = room.botPlayer.chooseLandmark(landmarks);
+        } else if (landmarks.length === 0) {
             room.landmarkSelections[p.id] = { skip: true };
             roomMgr.send(p.ws, 'GAME_PHASE', { phase: 'LANDMARK', landmarks: [] });
         } else {
@@ -559,7 +657,7 @@ async function startGame(room, roomMgr, csvText) {
         }
     }
 
-    checkLandmarksComplete(room, roomMgr);
+    await checkLandmarksComplete(room, roomMgr);
 }
 
 // ─── Start War Round ─────────────────────────────────────────
@@ -613,15 +711,40 @@ async function startWarRound(warRoom, warRoomMgr, roomMgr, csvText) {
         roomMgr.send(activeP.ws, 'REQUEST_CHOICE', { options, description: desc });
     };
 
-    controller.onOpponentResponse = (player, cb) => {
+    controller.onOpponentResponse = (player, cb, chainContext) => {
         const p = gameRoom.players.find(rp => rp.id === player.id);
         if (!p) { cb({ activate: false }); return; }
-        const faceDownCards = player.getFaceDownCards().filter(c => c.type === 'Spell' || c.type === 'Trap');
+        const faceDownCards = player.getFaceDownCards().filter(c =>
+            (c.type === 'Spell' || c.type === 'Trap') && !c.setThisTurn
+        );
         if (faceDownCards.length === 0) { cb({ activate: false }); return; }
+
+        // Validate each card and annotate with canActivate/reason
+        const validator = controller.actionValidator;
+        const effectEngine = controller.effectEngine;
+        const annotated = faceDownCards.map(card => {
+            let canActivate = false;
+            let reason = '';
+            if (card.type === 'Trap') {
+                const result = validator.canActivateTrap(player.id, card, {
+                    effectEngine,
+                    triggerContext: chainContext?.triggerContext,
+                    triggerType: chainContext?.triggerType
+                });
+                canActivate = result.valid;
+                reason = result.reason || '';
+            } else if (card.type === 'Spell') {
+                const result = validator.canActivateSetSpell(player.id, card, { isResponse: true });
+                canActivate = result.valid;
+                reason = result.reason || '';
+            }
+            return { ...serializeCard(card), canActivate, reason };
+        });
+        console.log(`🎴 Response: P${player.id} has ${faceDownCards.length} face-down, ${annotated.filter(c => c.canActivate).length} activatable (trigger: ${chainContext?.triggerType})`);
+
         gameRoom.pendingResponseCb = cb;
         gameRoom.pendingResponsePlayerId = player.id;
-        const serialized = faceDownCards.map(c => serializeCard(c));
-        roomMgr.send(p.ws, 'REQUEST_RESPONSE', { faceDownCards: serialized });
+        roomMgr.send(p.ws, 'REQUEST_RESPONSE', { faceDownCards: annotated, triggerType: chainContext?.triggerType });
     };
 
     controller.onUIUpdate = () => {
@@ -654,7 +777,8 @@ async function startWarRound(warRoom, warRoomMgr, roomMgr, csvText) {
     for (const p of gameRoom.players) {
         const player = gs.getPlayerById(p.id);
         const seenCardIds = new Set();
-        const landmarks = player.deck.filter(c => {
+        const allCards = [...player.deck, ...player.hand];
+        const landmarks = allCards.filter(c => {
             if (c.type !== 'Landmark') return false;
             if (seenCardIds.has(c.cardId)) return false;
             seenCardIds.add(c.cardId);
@@ -670,10 +794,10 @@ async function startWarRound(warRoom, warRoomMgr, roomMgr, csvText) {
         }
     }
 
-    checkLandmarksComplete(gameRoom, roomMgr);
+    await checkLandmarksComplete(gameRoom, roomMgr);
 }
 
-function checkLandmarksComplete(room, roomMgr) {
+async function checkLandmarksComplete(room, roomMgr) {
     if (Object.keys(room.landmarkSelections).length < 2) return;
 
     const gs = room.controller.gameState;
@@ -683,9 +807,18 @@ function checkLandmarksComplete(room, roomMgr) {
         const selection = room.landmarkSelections[p.id];
         if (selection && !selection.skip && selection.cardInstanceId) {
             const player = gs.getPlayerById(p.id);
-            const deckIdx = player.deck.findIndex(c => c.instanceId === selection.cardInstanceId);
+            // Look in deck first, then hand
+            let deckIdx = player.deck.findIndex(c => c.instanceId === selection.cardInstanceId);
+            let removed = null;
             if (deckIdx !== -1) {
-                const removed = player.deck.splice(deckIdx, 1)[0];
+                removed = player.deck.splice(deckIdx, 1)[0];
+            } else {
+                const handIdx = player.hand.findIndex(c => c.instanceId === selection.cardInstanceId);
+                if (handIdx !== -1) {
+                    removed = player.hand.splice(handIdx, 1)[0];
+                }
+            }
+            if (removed) {
                 removed.faceUp = true;
                 if (player.landmarkZone) {
                     player.graveyard.push(player.landmarkZone);
@@ -701,9 +834,17 @@ function checkLandmarksComplete(room, roomMgr) {
     room.mulliganDone = {};
 
     for (const p of room.players) {
-        const player = gs.getPlayerById(p.id);
-        const hand = player.hand.map(c => serializeCard(c));
-        roomMgr.send(p.ws, 'REQUEST_MULLIGAN', { hand });
+        if (p.isBot && room.botPlayer) {
+            // Bot auto-mulligans
+            const player = gs.getPlayerById(p.id);
+            const toMulligan = room.botPlayer.chooseMulligan(player.hand);
+            await room.controller.turnManager.performMulligan(p.id, toMulligan);
+            room.mulliganDone[p.id] = true;
+        } else {
+            const player = gs.getPlayerById(p.id);
+            const hand = player.hand.map(c => serializeCard(c));
+            roomMgr.send(p.ws, 'REQUEST_MULLIGAN', { hand });
+        }
     }
 }
 
@@ -723,6 +864,11 @@ async function checkMulliganComplete(room, roomMgr) {
         phase: 'PLAYING',
         activePlayerId: gs.activePlayerIndex,
     });
+
+    // If the starting player is a bot, trigger its turn
+    if (room.botPlayer && gs.activePlayerIndex === room.botPlayer.playerId) {
+        setTimeout(() => triggerBotTurn(room, roomMgr), 500);
+    }
 }
 
 // ─── Action Handler ──────────────────────────────────────────
@@ -745,14 +891,16 @@ async function handleAction(room, ws, msg, roomMgr) {
                 room.landmarkSelections[playerId] = { skip: true };
             }
             roomMgr.send(ws, 'GAME_PHASE', { phase: 'WAITING', message: 'Waiting for opponent...' });
-            checkLandmarksComplete(room, roomMgr);
+            await checkLandmarksComplete(room, roomMgr);
             return;
         }
 
         case 'MULLIGAN': {
             if (room.phase !== 'MULLIGAN') return;
             const cardInstanceIds = msg.cardInstanceIds || [];
-            await controller.mulligan(playerId, cardInstanceIds);
+            // Use performMulligan directly (NOT controller.mulligan which also calls
+            // checkMulliganComplete internally, causing a double-start bug)
+            await controller.turnManager.performMulligan(playerId, cardInstanceIds);
             room.mulliganDone[playerId] = true;
             roomMgr.send(ws, 'GAME_PHASE', { phase: 'WAITING', message: 'Waiting for opponent...' });
             await checkMulliganComplete(room, roomMgr);
@@ -830,9 +978,20 @@ async function handleAction(room, ws, msg, roomMgr) {
             case 'ACTIVATE_TRAP':
                 result = await controller.activateTrap(playerId, msg.cardInstanceId);
                 break;
-            case 'DECLARE_ATTACK':
-                result = await controller.declareAttack(playerId, msg.attackerInstanceId, msg.targetInfo);
+            case 'DECLARE_ATTACK': {
+                // Resolve serialized targetInfo to actual game objects
+                const targetInfo = msg.targetInfo || {};
+                const resolvedTarget = { type: targetInfo.type };
+                if (targetInfo.targetPlayerId !== undefined) {
+                    resolvedTarget.player = gs.getPlayerById(targetInfo.targetPlayerId);
+                }
+                if (targetInfo.cardInstanceId && resolvedTarget.player) {
+                    resolvedTarget.card = resolvedTarget.player.getFieldUnits()
+                        .find(u => u.instanceId === targetInfo.cardInstanceId);
+                }
+                result = await controller.declareAttack(playerId, msg.attackerInstanceId, resolvedTarget);
                 break;
+            }
             case 'ACTIVATE_ABILITY':
                 result = await controller.activateAbility(playerId, msg.cardInstanceId);
                 break;
@@ -874,7 +1033,7 @@ async function handleAction(room, ws, msg, roomMgr) {
                             duration,
                             rounds: gs.roundCounter,
                             turns: gs.turnCounter,
-                            players: room.players.map(p => ({ name: p.name, region: p.region })),
+                            players: room.players.map(p => ({ name: p.name, region: p.region, lp: gs.getPlayerById(p.id)?.lp ?? 0 })),
                         };
                         roomMgr.broadcast(room, 'GAME_OVER', matchData);
                         logMatchToCSV({
@@ -898,6 +1057,11 @@ async function handleAction(room, ws, msg, roomMgr) {
                         round: gs.roundCounter,
                         turn: gs.turnCounter,
                     });
+
+                    // If next player is a bot, trigger its turn
+                    if (room.botPlayer && gs.activePlayerIndex === room.botPlayer.playerId) {
+                        setTimeout(() => triggerBotTurn(room, roomMgr), 600);
+                    }
                 }
                 break;
             default:
@@ -942,7 +1106,7 @@ async function handleAction(room, ws, msg, roomMgr) {
                 duration,
                 rounds: gs.roundCounter,
                 turns: gs.turnCounter,
-                players: room.players.map(p => ({ name: p.name, region: p.region })),
+                players: room.players.map(p => ({ name: p.name, region: p.region, lp: gs.getPlayerById(p.id)?.lp ?? 0 })),
             };
             roomMgr.broadcast(room, 'GAME_OVER', matchData);
             logMatchToCSV({
@@ -958,6 +1122,40 @@ async function handleAction(room, ws, msg, roomMgr) {
                 player2Region: room.players[1]?.region,
             });
         }
+    }
+}
+
+// ─── Bot Turn Trigger ────────────────────────────────────────
+
+async function triggerBotTurn(room, roomMgr) {
+    if (!room.botPlayer) return;
+    const gs = room.controller.gameState;
+    if (gs.gameOver) return;
+    if (gs.activePlayerIndex !== room.botPlayer.playerId) return;
+
+    console.log(`🤖 Bot is taking its turn...`);
+    await room.botPlayer.performTurn();
+
+    // After bot turn, broadcast state
+    broadcastGameState(room, roomMgr);
+
+    if (gs.gameOver) {
+        const duration = room.startedAt ? Math.round((Date.now() - room.startedAt) / 1000) : 0;
+        const matchData = {
+            winner: gs.winner,
+            winnerName: gs.winner !== null ? gs.getPlayerById(gs.winner)?.name : null,
+            duration,
+            rounds: gs.roundCounter,
+            turns: gs.turnCounter,
+            players: room.players.map(p => ({ name: p.name, region: p.region, lp: gs.getPlayerById(p.id)?.lp ?? 0 })),
+        };
+        roomMgr.broadcast(room, 'GAME_OVER', matchData);
+    } else {
+        roomMgr.broadcast(room, 'TURN_CHANGE', {
+            activePlayerId: gs.activePlayerIndex,
+            round: gs.roundCounter,
+            turn: gs.turnCounter,
+        });
     }
 }
 
@@ -978,8 +1176,8 @@ app.use(express.static(join(PROJECT_ROOT, 'dist')));
 
 // Also serve card images and CSV from project root
 app.use('/output', express.static(join(PROJECT_ROOT, 'dist', 'output')));
-app.use('/card_dataV4.2.csv', (req, res) => {
-    res.sendFile(join(PROJECT_ROOT, 'card_dataV4.2.csv'));
+app.use('/card_dataV4.3.csv', (req, res) => {
+    res.sendFile(join(PROJECT_ROOT, 'card_dataV4.3.csv'));
 });
 
 // Serve match history CSV for download
@@ -1004,10 +1202,10 @@ const warRoomMgr = new WarRoomManager();
 // Load CSV for game setup
 let csvText;
 try {
-    csvText = readFileSync(join(PROJECT_ROOT, 'card_dataV4.2.csv'), 'utf-8');
+    csvText = readFileSync(join(PROJECT_ROOT, 'card_dataV4.3.csv'), 'utf-8');
     console.log('✅ Card data loaded for server.');
 } catch (err) {
-    console.error('❌ Failed to load card_dataV4.2.csv:', err.message);
+    console.error('❌ Failed to load card_dataV4.3.csv:', err.message);
     process.exit(1);
 }
 
@@ -1100,6 +1298,60 @@ wss.on('connection', (ws) => {
                 break;
             }
 
+            case 'PLAY_VS_AI': {
+                // Create a room with a bot opponent
+                const aiRoom = roomMgr.createRoom(ws, msg.playerName || 'Player');
+
+                // Create bot socket and add bot as player 2
+                const botSocket = BotPlayer.createSocket();
+                const botName = msg.aiName || 'AI Opponent';
+                const botJoin = roomMgr.joinRoom(aiRoom.code, botSocket, botName);
+                if (botJoin.error) {
+                    roomMgr.send(ws, 'ERROR', { message: 'Failed to create AI room: ' + botJoin.error });
+                    break;
+                }
+
+                const room = botJoin.room;
+
+                // Assign regions — human gets their chosen region or random, bot gets another
+                if (msg.region) {
+                    room.players[0].region = msg.region;
+                    const allRegions = ['Northern', 'Eastern', 'Southern', 'Western'].filter(r => r !== msg.region);
+                    room.players[1].region = allRegions[Math.floor(Math.random() * allRegions.length)];
+                } else {
+                    roomMgr.assignRandomRegions(room);
+                }
+
+                // Create and attach bot
+                const difficulty = msg.difficulty || 'medium';
+                const bot = new BotPlayer(1, difficulty);
+                const humanP = room.players[0];
+                const botP = room.players[1];
+
+                // Mark bot BEFORE startGame so landmark/mulligan checks see it
+                botP.isBot = true;
+                room.botPlayer = bot;
+
+                // Notify human player
+                roomMgr.send(humanP.ws, 'MATCH_FOUND', {
+                    yourRegion: humanP.region,
+                    opponentName: botP.name,
+                    opponentRegion: botP.region,
+                });
+
+                console.log(`🤖 AI game: ${humanP.name} (${humanP.region}) vs ${botP.name} (${botP.region}) [${difficulty}]`);
+
+                try {
+                    await startGame(room, roomMgr, csvText);
+                    // Attach bot AFTER startGame wires the controller (creates AIPlayer)
+                    bot.attach(room);
+                } catch (err) {
+                    console.error('Failed to start AI game:', err);
+                    roomMgr.send(ws, 'ERROR', { message: 'Failed to start game: ' + err.message });
+                }
+                break;
+            }
+
             case 'CREATE_WAR_ROOM': {
                 const warRoom = warRoomMgr.createWarRoom(ws, msg.playerName || 'Player 1');
                 warRoomMgr.send(ws, 'WAR_ROOM_CREATED', { roomCode: warRoom.code });
@@ -1117,9 +1369,29 @@ wss.on('connection', (ws) => {
                 break;
             }
 
+            case 'FIND_WAR_MATCH': {
+                const name = msg.playerName || 'Player';
+                warRoomMgr.addToWarQueue(ws, name);
+                warRoomMgr.send(ws, 'WAR_SEARCHING', { message: 'Looking for a war opponent...' });
+                console.log(`🔍 ${name} is searching for a war match (queue: ${warRoomMgr.warMatchQueue.length})`);
+
+                const warMatched = warRoomMgr.tryWarMatchFromQueue();
+                if (warMatched) {
+                    console.log(`⚔ War match found: ${warMatched.players.map(p => `${p.name} (${p.region})`).join(' vs ')}`);
+                }
+                break;
+            }
+
+            case 'CANCEL_WAR_MATCH': {
+                warRoomMgr.removeFromWarQueue(ws);
+                warRoomMgr.send(ws, 'WAR_MATCH_CANCELLED', { message: 'War search cancelled.' });
+                console.log(`❌ Player cancelled war match search`);
+                break;
+            }
+
             case 'WAR_DRAFT_SYNC': {
                 const warRoom = warRoomMgr.getWarRoomByWs(ws);
-                if (warRoom && warRoom.phase === 'DECK_BUILD') {
+                if (warRoom) {
                     warRoomMgr.handleDraftSync(warRoom, ws, msg.pool1Ids || [], msg.pool2Ids || [], msg.extraPools || []);
                 }
                 break;
@@ -1128,7 +1400,15 @@ wss.on('connection', (ws) => {
             case 'WAR_DECK_READY': {
                 const warRoom = warRoomMgr.getWarRoomByWs(ws);
                 if (warRoom) {
-                    const ready = warRoomMgr.handleDeckReady(warRoom, ws, msg.cardIds || []);
+                    warRoomMgr.handleDeckReady(warRoom, ws, msg.cardIds || []);
+                }
+                break;
+            }
+
+            case 'WAR_READY_CHECK': {
+                const warRoom = warRoomMgr.getWarRoomByWs(ws);
+                if (warRoom) {
+                    const ready = warRoomMgr.handleReadyCheck(warRoom, ws);
                     if (ready) {
                         try {
                             await startWarRound(warRoom, warRoomMgr, roomMgr, csvText);
@@ -1171,6 +1451,7 @@ wss.on('connection', (ws) => {
         console.log('🔌 WebSocket disconnected');
         roomMgr.removeFromQueue(ws);
         roomMgr.removePlayer(ws);
+        warRoomMgr.removeFromWarQueue(ws);
         warRoomMgr.removePlayer(ws);
     });
 

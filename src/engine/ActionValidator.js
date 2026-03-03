@@ -176,12 +176,15 @@ export class ActionValidator {
     /**
      * Check if a face-down spell can be activated (costs mana when flipped)
      */
-    canActivateSetSpell(playerId, cardInstance) {
+    canActivateSetSpell(playerId, cardInstance, options = {}) {
         const gs = this.gameState;
         const player = gs.getPlayerById(playerId);
         if (!player) return { valid: false, reason: 'Invalid player.' };
-        if (!gs.isPlayersTurn(playerId)) return { valid: false, reason: 'Not your turn.' };
-        if (gs.phase !== PHASES.MAIN1 && gs.phase !== PHASES.MAIN2) return { valid: false, reason: 'Can only activate during Main Phase.' };
+        // Skip turn/phase checks when activating in response to an opponent's action
+        if (!options.isResponse) {
+            if (!gs.isPlayersTurn(playerId)) return { valid: false, reason: 'Not your turn.' };
+            if (gs.phase !== PHASES.MAIN1 && gs.phase !== PHASES.MAIN2) return { valid: false, reason: 'Can only activate during Main Phase.' };
+        }
         if (cardInstance.type !== 'Spell') return { valid: false, reason: 'Card is not a Spell.' };
         if (cardInstance.faceUp) return { valid: false, reason: 'Card is already face-up.' };
         if (cardInstance.setThisTurn) return { valid: false, reason: 'Cannot activate a card the same turn it was set.' };

@@ -703,6 +703,7 @@ export class GameController {
      * Then the chain resolves in LIFO (last-in-first-out) order.
      */
     async _resolveChain(triggerType = 'action', triggerContext = {}) {
+        console.log(`⛓ _resolveChain called: triggerType=${triggerType}, hasCallback=${!!this.onOpponentResponse}`);
         if (!this.onOpponentResponse) return;
         const gs = this.gameState;
         const activeId = gs.activePlayerIndex;
@@ -713,6 +714,7 @@ export class GameController {
         for (const player of gs.players) {
             if (player.id !== activeId && player.isAlive) playerOrder.push(player);
         }
+        console.log(`⛓ playerOrder: ${playerOrder.map(p => `P${p.id}(${p.name})`).join(', ')} | activeId=${activeId}`);
         if (playerOrder.length === 0) return;
         let activePlayerIncluded = false;
 
@@ -727,6 +729,7 @@ export class GameController {
 
             // Check if player has any face-down spells or traps they could activate
             const faceDownCards = player.getFaceDownCards().filter(c => c.type === 'Spell' || c.type === 'Trap');
+            console.log(`⛓ P${player.id} face-down cards: ${faceDownCards.length} (${faceDownCards.map(c => `${c.name}[${c.type}]`).join(', ')})`);
             if (faceDownCards.length === 0) {
                 consecutivePasses++;
                 currentPlayerIdx++;

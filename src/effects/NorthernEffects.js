@@ -24,6 +24,10 @@ export function register(effectEngine, cardDB) {
                         ee.applyPermStatMod(unit, 0, 200, 'Frostfell Citadel');
                         unit._n001Applied = true;
                     }
+                    if (unit.position === 'ATK' && unit._n001Applied) {
+                        ee.applyPermStatMod(unit, 0, -200, 'Frostfell Citadel lost');
+                        unit._n001Applied = false;
+                    }
                 }
             },
         }),
@@ -46,17 +50,39 @@ export function register(effectEngine, cardDB) {
         createEffect({
             cardId: 'N001',
             trigger: EFFECT_EVENTS.ON_POSITION_CHANGE,
-            description: 'Unit switched to DEF gains +200 DEF',
+            description: 'Unit switched to DEF gains +200 DEF; loses it on switch to ATK',
             condition: (gs, ctx) => {
                 const owner = gs.getPlayerById(ctx.changedCard?.ownerId);
                 return owner?.landmarkZone?.cardId === 'N001' &&
-                    !owner.landmarkZone.silenced &&
-                    ctx.changedCard?.position === 'DEF' &&
-                    !ctx.changedCard._n001Applied;
+                    !owner.landmarkZone.silenced;
             },
             execute: (gs, ctx, ee) => {
-                ee.applyPermStatMod(ctx.changedCard, 0, 200, 'Frostfell Citadel');
-                ctx.changedCard._n001Applied = true;
+                if (ctx.changedCard.position === 'DEF' && !ctx.changedCard._n001Applied) {
+                    ee.applyPermStatMod(ctx.changedCard, 0, 200, 'Frostfell Citadel');
+                    ctx.changedCard._n001Applied = true;
+                } else if (ctx.changedCard.position === 'ATK' && ctx.changedCard._n001Applied) {
+                    ee.applyPermStatMod(ctx.changedCard, 0, -200, 'Frostfell Citadel lost');
+                    ctx.changedCard._n001Applied = false;
+                }
+            },
+        }),
+        createEffect({
+            cardId: 'N001',
+            trigger: EFFECT_EVENTS.ON_LANDMARK_PLACED,
+            description: 'When Frostfell Citadel is placed, existing DEF units gain +200 DEF',
+            condition: (gs, ctx) => {
+                return ctx.landmark?.cardId === 'N001' &&
+                    !ctx.landmark.silenced;
+            },
+            execute: (gs, ctx, ee) => {
+                const owner = ctx.targetPlayer;
+                if (!owner) return;
+                for (const unit of owner.getFieldUnits()) {
+                    if (unit.position === 'DEF' && !unit._n001Applied) {
+                        ee.applyPermStatMod(unit, 0, 200, 'Frostfell Citadel');
+                        unit._n001Applied = true;
+                    }
+                }
             },
         }),
     ]);

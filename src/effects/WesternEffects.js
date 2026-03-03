@@ -162,7 +162,7 @@ export function register(effectEngine, cardDB) {
 
     // W011: Canyon Ambusher — Rush (keyword only)
 
-    // W012: Totem Carver — When unit returned to hand: reduce cost by 1, gain 1 mana
+    // W012: Totem Carver — When unit returned to hand from the field: reduce cost by 1, gain 1 mana
     effectEngine.registerCardEffects('W012', [
         createEffect({
             cardId: 'W012',

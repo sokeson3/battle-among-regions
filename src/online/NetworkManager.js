@@ -93,6 +93,13 @@ export class NetworkManager {
         this.send('JOIN_ROOM', { roomCode, playerName });
     }
 
+    /**
+     * Start a game against a server-side AI bot
+     */
+    playVsAI(playerName, region = null, difficulty = 'medium') {
+        this.send('PLAY_VS_AI', { playerName, region, difficulty });
+    }
+
     // ─── Game Actions ────────────────────────────────────────
 
     selectLandmark(cardInstanceId) {
@@ -172,6 +179,14 @@ export class NetworkManager {
     }
 
     // ─── War Campaign Actions ────────────────────────────────
+
+    findWarMatch(playerName) {
+        this.send('FIND_WAR_MATCH', { playerName });
+    }
+
+    cancelWarMatch() {
+        this.send('CANCEL_WAR_MATCH');
+    }
 
     createWarRoom(playerName) {
         this.send('CREATE_WAR_ROOM', { playerName });

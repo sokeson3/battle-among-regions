@@ -1,11 +1,10 @@
 // ─────────────────────────────────────────────────────────────
 // GameUI.js — Renders the game board and handles interactions
-// Handles both AI (local controller) and Online (network) modes
+// Handles Online (network) mode — AI runs server-side via BotPlayer
 // ─────────────────────────────────────────────────────────────
 
 import { PHASES } from '../engine/GameState.js';
 import { DuelDeckBuilderUI } from './DuelDeckBuilderUI.js';
-import { AIPlayer } from '../engine/AIPlayer.js';
 import * as SharedUI from './SharedUI.js';
 import * as MatchHistory from '../online/MatchHistory.js';
 
@@ -19,8 +18,6 @@ export class GameUI {
     this.selectedCard = null;
     this.attackingUnit = null;
     this.currentScreen = 'menu';
-    this.ai = null;           // AIPlayer instance for vs-AI mode
-    this._aiTurnInProgress = false;
     this.playerConfigs = [];
     this.playerCount = 2;  // 2, 3, or 4
     this.previewTimeout = null;
@@ -197,7 +194,11 @@ export class GameUI {
     });
 
     net.on('REQUEST_RESPONSE', (msg) => {
-      const cards = msg.faceDownCards.map(c => ({ instanceId: c.instanceId, cardId: c.cardId, name: c.name, type: c.type, manaCost: c.manaCost }));
+      const cards = msg.faceDownCards.map(c => ({
+        instanceId: c.instanceId, cardId: c.cardId, name: c.name,
+        type: c.type, manaCost: c.manaCost,
+        canActivate: c.canActivate, reason: c.reason
+      }));
       SharedUI.showResponseDialog(document.body, cards, (result) => {
         net.send('OPPONENT_RESPONSE', { response: result });
       });
@@ -225,7 +226,9 @@ export class GameUI {
         myPlayerId: this.myPlayerId,
         players: msg.players || [],
       });
-      this._showOnlineGameOver(msg);
+      // Store server msg so unified showGameOver can use it
+      this._onlineGameOverMsg = msg;
+      this.showGameOver();
     });
 
     net.on('ERROR', (msg) => {
@@ -256,17 +259,31 @@ export class GameUI {
   /** Route an action to either the local controller or the network */
   async _doAction(type, ...args) {
     if (this.isOnline) {
+      // Network methods do NOT take playerId (server knows who sent via WebSocket).
+      // All callers pass (playerId, ...restArgs), so strip the first arg for network calls.
+      // Exception: actions with no playerId arg (enterBattle, exitBattle, endTurn).
+      const netArgs = args.slice(1); // Remove playerId
       switch (type) {
-        case 'playUnit': this.net.playUnit(...args); break;
-        case 'playSpell': this.net.playSpell(...args); break;
-        case 'setSpell': this.net.setSpell(...args); break;
-        case 'setTrap': this.net.setTrap(...args); break;
-        case 'playLandmark': this.net.playLandmark(...args); break;
-        case 'activateSetSpell': this.net.activateSetSpell(...args); break;
-        case 'activateTrap': this.net.activateTrap(...args); break;
-        case 'declareAttack': this.net.declareAttack(...args); break;
-        case 'activateAbility': this.net.activateAbility(...args); break;
-        case 'changePosition': this.net.changePosition(...args); break;
+        case 'playUnit': this.net.playUnit(...netArgs); break;
+        case 'playSpell': this.net.playSpell(...netArgs); break;
+        case 'setSpell': this.net.setSpell(...netArgs); break;
+        case 'setTrap': this.net.setTrap(...netArgs); break;
+        case 'playLandmark': this.net.playLandmark(...netArgs); break;
+        case 'activateSetSpell': this.net.activateSetSpell(...netArgs); break;
+        case 'activateTrap': this.net.activateTrap(...netArgs); break;
+        case 'declareAttack': {
+          // Serialize targetInfo: send just IDs, not full objects
+          const [attackerId, targetInfo] = netArgs;
+          const serializedTarget = {
+            type: targetInfo.type,
+            targetPlayerId: targetInfo.player?.id,
+            cardInstanceId: targetInfo.card?.instanceId,
+          };
+          this.net.declareAttack(attackerId, serializedTarget);
+          break;
+        }
+        case 'activateAbility': this.net.activateAbility(...netArgs); break;
+        case 'changePosition': this.net.changePosition(...netArgs); break;
         case 'enterBattlePhase': this.net.enterBattle(); break;
         case 'exitBattlePhase': this.net.exitBattle(); break;
         case 'endTurn': this.net.endTurn(); break;
@@ -274,7 +291,7 @@ export class GameUI {
       }
       return { success: true }; // Server validates
     }
-    // Local mode — call controller directly
+    // Local mode — call controller directly (needs playerId)
     const fn = this.controller[type];
     if (fn) return fn.call(this.controller, ...args);
     return { success: false, reason: 'Unknown action' };
@@ -466,170 +483,47 @@ export class GameUI {
           }
         }
 
-        await this.startAIGame(config);
+        // Connect to server for AI game (bypass OnlineGameUI lobby events)
+        if (this.onlineUI) {
+          try {
+            const net = this.onlineUI.net;
+            // Disconnect any previous connection
+            if (net.connected || net.ws) {
+              net.disconnect();
+            }
+            net.removeAllListeners();
+
+            // Connect directly without wiring lobby events
+            const envUrl = typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_SERVER_URL;
+            let url;
+            if (envUrl) {
+              url = envUrl;
+            } else if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+              url = `ws://${window.location.hostname}:4000`;
+            } else {
+              const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+              url = `${protocol}//${window.location.host}`;
+            }
+
+            await net.connect(url);
+
+            // Wire only the MATCH_FOUND handler — skip ROOM_CREATED/SEARCHING etc.
+            net.on('MATCH_FOUND', (msg) => {
+              this.net = net;
+              this.startOnlineGame(net, 0); // Human is always player 0
+            });
+
+            // Send PLAY_VS_AI request
+            net.playVsAI(config.name, region, 'medium');
+            return;
+          } catch (e) {
+            // fall through to error
+          }
+        }
+        // Show connection error
+        alert('Could not connect to server. Please make sure the server is running.');
       };
     });
-  }
-
-  async startAIGame(playerConfig) {
-    this.currentScreen = 'game';
-    this.playerCount = 2;
-
-    // Pick a random different region for the AI
-    const allRegions = ['Northern', 'Eastern', 'Southern', 'Western'];
-    const aiRegions = allRegions.filter(r => r !== playerConfig.region);
-    const aiRegion = aiRegions[Math.floor(Math.random() * aiRegions.length)];
-
-    this.playerConfigs = [
-      playerConfig,
-      { name: 'AI Opponent', region: aiRegion },
-    ];
-
-    const options = {
-      gameMode: 'ai',
-      startingLP: 3000,
-      startingPlayer: 0,
-    };
-
-    await this.controller.setupGame(this.playerConfigs, options);
-
-    // Create AI player
-    this.ai = new AIPlayer(this.controller, 1, 'medium');
-
-    // Wire AI callbacks for target/choice/response
-    this._wireAICallbacks();
-
-    // Auto-select landmark for AI
-    this._aiAutoSelectLandmark();
-
-    // Show landmark selection for human player, then start
-    this.showLandmarkSelect(0);
-  }
-
-  /**
-   * Wire the AI to answer target/choice queries and auto-pass on response prompts.
-   * Mirrors CampaignUI._wireAICallbacks().
-   */
-  _wireAICallbacks() {
-    const origOnTarget = this.controller.effectEngine.onTargetRequired;
-    const origOnChoice = this.controller.effectEngine.onChoiceRequired;
-    const origOnResponse = this.controller.onOpponentResponse;
-
-    this.controller.effectEngine.onTargetRequired = (targets, desc, cb) => {
-      const sourcePlayerId = this.controller.effectEngine._currentSourcePlayerId;
-      if (sourcePlayerId === 1 && this.ai) {
-        const target = this.ai.chooseTarget(targets, desc);
-        setTimeout(() => cb(target), 100);
-      } else if (origOnTarget) {
-        origOnTarget(targets, desc, cb);
-      }
-    };
-
-    this.controller.effectEngine.onChoiceRequired = (options, desc, cb) => {
-      const sourcePlayerId = this.controller.effectEngine._currentSourcePlayerId;
-      if (sourcePlayerId === 1 && this.ai) {
-        const choice = this.ai.chooseOption(options, desc);
-        setTimeout(() => cb(choice), 100);
-      } else if (origOnChoice) {
-        origOnChoice(options, desc, cb);
-      }
-    };
-
-    // AI auto-passes; human gets the response dialog during AI's turn
-    this.controller.onOpponentResponse = (player, callback, chainContext) => {
-      if (player.id === 1) {
-        // AI auto-passes
-        setTimeout(() => callback({ activate: false }), 50);
-      } else if (origOnResponse) {
-        origOnResponse(player, callback, chainContext);
-      } else {
-        callback({ activate: false });
-      }
-    };
-
-    // Wire AI action callback for visual feedback
-    this.ai.onAction = async (actionType, data) => {
-      if (actionType === 'attack') {
-        // Show attack animation with attacker and target
-        const targetUnit = data.target?.type === 'unit' ? data.target.card : null;
-        const targetPlayer = data.target?.type === 'direct' ? data.target.player : null;
-        this._showAttackAnimation(data.attacker, targetUnit, targetPlayer);
-        await new Promise(r => setTimeout(r, 2400));
-      } else if (actionType === 'summon') {
-        await new Promise(r => setTimeout(r, 1500));
-      } else if (actionType === 'spell') {
-        await new Promise(r => setTimeout(r, 1500));
-      } else if (actionType === 'setTrap') {
-        await new Promise(r => setTimeout(r, 800));
-      } else if (actionType === 'landmark') {
-        await new Promise(r => setTimeout(r, 1500));
-      }
-    };
-  }
-
-  /**
-   * Auto-select a landmark for the AI opponent.
-   */
-  _aiAutoSelectLandmark() {
-    const gs = this.controller.gameState;
-    const aiPlayer = gs.getPlayerById(1);
-    if (!aiPlayer) return;
-
-    const landmarks = this.controller.cardDB.getLandmarksByRegion(aiPlayer.region);
-    if (landmarks.length > 0) {
-      const landmarkCard = this.controller.cardDB.createCardInstance(landmarks[0].id, 1);
-      if (landmarkCard) {
-        landmarkCard.faceUp = true;
-        aiPlayer.landmarkZone = landmarkCard;
-      }
-    }
-  }
-
-  /**
-   * Handle AI turn transition — render board, run AI, then transition back.
-   */
-  async _handleAITurnTransition() {
-    const gs = this.controller.gameState;
-
-    if (gs.gameOver) {
-      this.showGameOver();
-      return;
-    }
-
-    if (gs.activePlayerIndex === 1 && this.ai) {
-      this._aiTurnInProgress = true;
-      // Keep board visible from player's perspective
-      this.render();
-
-      // Show turn banner for AI turn
-      this._showTurnBanner('AI Turn', `${gs.getPlayerById(1).region} Region`);
-
-      // Brief pause before AI starts acting
-      await new Promise(r => setTimeout(r, 600));
-
-      // Let AI play its turn — wrapped in try/catch for error recovery
-      try {
-        await this.ai.performTurn();
-      } catch (err) {
-        console.error('AI turn error — recovering:', err);
-      }
-
-      this._aiTurnInProgress = false;
-
-      // After AI turn completes, check game over
-      if (gs.gameOver) {
-        this.showGameOver();
-        return;
-      }
-
-      // Render the board for player's turn (no transition screen needed)
-      // Show turn banner for player's turn
-      this._showTurnBanner('Your Turn', `Round ${gs.roundCounter}`);
-      this.render();
-    } else {
-      // Player's turn — just render (no hot-seat handoff screen)
-      this.render();
-    }
   }
 
   showRegionSelect(playerIndex, gameMode) {
@@ -904,6 +798,7 @@ export class GameUI {
       const renderMulligan = () => {
         this.app.innerHTML = `
           <div class="mulligan-screen">
+            <button class="global-menu-btn" id="btn-menu">☰ Menu</button>
             <h2>Mulligan Phase</h2>
             <p>Select cards to replace (click to toggle)</p>
             <div class="mulligan-cards">
@@ -930,6 +825,7 @@ export class GameUI {
             renderMulligan();
           };
         });
+        this._wireGlobalMenuButton();
 
         document.getElementById('btn-accept-mulligan').onclick = () => {
           this.net.send('MULLIGAN', { cardInstanceIds: [...selectedIds] });
@@ -1446,8 +1342,28 @@ export class GameUI {
 
       let canPlay;
       if (this.isOnline) {
-        // Online: simplified — server validates
-        canPlay = canAct && isMainPhase;
+        // Online: lightweight client-side validation for consistent visual feedback
+        // (server still does full validation on action)
+        const pm = player.primaryMana || 0;
+        const sm = player.spellMana || 0;
+        const cost = card.manaCost || 0;
+        const unitSlots = player.unitZone || [];
+        const stSlots = player.spellTrapZone || [];
+        const hasUnitSlot = unitSlots.some(s => s === null);
+        const hasSTSlot = stSlots.some(s => s === null);
+
+        if (card.type === 'Unit') {
+          canPlay = canAct && isMainPhase && pm >= cost && hasUnitSlot;
+        } else if (card.type === 'Spell') {
+          // Spell is playable if it can be activated (costs mana) OR set face-down (free, just needs a slot)
+          canPlay = canAct && isMainPhase && ((pm + sm) >= cost || hasSTSlot);
+        } else if (card.type === 'Trap') {
+          canPlay = canAct && isMainPhase && hasSTSlot; // Traps are free to set; mana paid on activation
+        } else if (card.type === 'Landmark') {
+          canPlay = canAct && isMainPhase && (pm + sm) >= cost;
+        } else {
+          canPlay = false;
+        }
       } else {
         canPlay = canAct && isMainPhase && (
           (card.type === 'Unit' && this.controller.actionValidator.canPlayUnit(player.id, card).valid) ||
@@ -1534,7 +1450,7 @@ export class GameUI {
   _renderActionPanel(gs) {
     // During AI/online opponent turn, hide action buttons — player cannot act
     if (!this._isMyTurn()) {
-      return `<div class="action-panel"><span class="waiting-label">${this.isOnline ? "Opponent's Turn" : ''}</span></div>`;
+      return `<div class="action-panel"><span class="waiting-label">Opponent's Turn</span></div>`;
     }
 
     const phase = gs.phase;
@@ -1801,8 +1717,6 @@ export class GameUI {
         }
         if (gs.gameMode === 'campaign' && this.campaignUI) {
           this.campaignUI.handleTurnTransition();
-        } else if (gs.gameMode === 'ai') {
-          this._handleAITurnTransition();
         } else {
           this.showTurnTransition();
         }
@@ -1811,8 +1725,6 @@ export class GameUI {
         // Ensure the game doesn't get stuck: attempt AI transition anyway
         if (gs.gameOver) {
           this.showGameOver();
-        } else if (gs.gameMode === 'ai') {
-          this._handleAITurnTransition();
         } else if (gs.gameMode === 'campaign' && this.campaignUI) {
           this.campaignUI.handleTurnTransition();
         } else {
@@ -1888,13 +1800,25 @@ export class GameUI {
     if (cardType === 'Unit') {
       // YGO-style: Summon in ATK or Set in DEF
       const options = [];
-      const canSummon = this.isOnline ? true : this.controller.actionValidator.canPlayUnit(player.id, card).valid;
+      let canSummon;
+      if (this.isOnline) {
+        const hasSlot = (player.unitZone || []).some(s => s === null);
+        canSummon = (player.primaryMana || 0) >= (card.manaCost || 0) && hasSlot;
+      } else {
+        canSummon = this.controller.actionValidator.canPlayUnit(player.id, card).valid;
+      }
       if (canSummon) {
         options.push({ label: '⚔ Summon in ATK', value: 'atk', icon: '⚔' });
         options.push({ label: '🛡 Set in DEF', value: 'def', icon: '🛡' });
       }
       if (options.length === 0) {
-        this._showToast((!this.isOnline && this.controller.actionValidator.canPlayUnit(player.id, card).reason) || 'Cannot play this card.');
+        if (this.isOnline) {
+          const hasSlot = (player.unitZone || []).some(s => s === null);
+          if (!hasSlot) this._showToast('No available Unit slots.');
+          else this._showToast('Not enough mana.');
+        } else {
+          this._showToast(this.controller.actionValidator.canPlayUnit(player.id, card).reason || 'Cannot play this card.');
+        }
         return;
       }
       this._showCardActionMenu(rect, options, (choice) => {
@@ -1915,8 +1839,16 @@ export class GameUI {
     } else if (cardType === 'Spell') {
       // YGO-style: Activate or Set face-down
       const options = [];
-      const canActivate = this.isOnline ? true : this.controller.actionValidator.canPlaySpell(player.id, card).valid;
-      const canSet = this.isOnline ? true : this.controller.actionValidator.canSetSpell(player.id, card).valid;
+      let canActivate, canSet;
+      if (this.isOnline) {
+        const totalMana = (player.primaryMana || 0) + (player.spellMana || 0);
+        const hasSTSlot = (player.spellTrapZone || []).some(s => s === null);
+        canActivate = totalMana >= (card.manaCost || 0);
+        canSet = hasSTSlot; // Setting a spell is free (mana paid on activation)
+      } else {
+        canActivate = this.controller.actionValidator.canPlaySpell(player.id, card).valid;
+        canSet = this.controller.actionValidator.canSetSpell(player.id, card).valid;
+      }
       if (canActivate) options.push({ label: '✦ Activate', value: 'activate', icon: '✦' });
       if (canSet) options.push({ label: '⬇ Set', value: 'set', icon: '⬇' });
       if (options.length === 0) {
@@ -1943,10 +1875,16 @@ export class GameUI {
       });
 
     } else if (cardType === 'Trap') {
-      // Traps can only be Set face-down
-      const canSet = this.isOnline ? true : this.controller.actionValidator.canSetTrap(player.id, card).valid;
+      // Traps can only be Set face-down (no mana cost to set; mana is paid on activation)
+      let canSet;
+      if (this.isOnline) {
+        const hasSTSlot = (player.spellTrapZone || []).some(s => s === null);
+        canSet = hasSTSlot;
+      } else {
+        canSet = this.controller.actionValidator.canSetTrap(player.id, card).valid;
+      }
       if (!canSet) {
-        this._showToast((!this.isOnline && this.controller.actionValidator.canSetTrap(player.id, card).reason) || 'Cannot set this Trap.');
+        this._showToast('No available Spell/Trap slots.');
         return;
       }
       this._showCardActionMenu(rect, [
@@ -1964,9 +1902,15 @@ export class GameUI {
       });
 
     } else if (cardType === 'Landmark') {
-      const canPlay = this.isOnline ? true : this.controller.actionValidator.canPlayLandmark(player.id, card).valid;
+      let canPlay;
+      if (this.isOnline) {
+        const totalMana = (player.primaryMana || 0) + (player.spellMana || 0);
+        canPlay = totalMana >= (card.manaCost || 0);
+      } else {
+        canPlay = this.controller.actionValidator.canPlayLandmark(player.id, card).valid;
+      }
       if (!canPlay) {
-        this._showToast((!this.isOnline && this.controller.actionValidator.canPlayLandmark(player.id, card).reason) || 'Cannot play this Landmark.');
+        this._showToast(this.isOnline ? 'Not enough mana.' : (this.controller.actionValidator.canPlayLandmark(player.id, card).reason || 'Cannot play this Landmark.'));
         return;
       }
       this._showCardActionMenu(rect, [
@@ -2004,9 +1948,10 @@ export class GameUI {
     if (unit) {
       // Battle phase: attack option
       if (gs.phase === PHASES.BATTLE) {
-        const canAttack = this.isOnline
-          ? (unit.position === 'ATK' && !unit.hasAttackedThisTurn && !unit.summonedThisTurn)
-          : this.controller.combatEngine.canAttack(unit);
+        const canAttack = unit.position === 'ATK'
+          && !(unit.hasAttackedThisTurn && (unit.attackCount || 1) >= (unit.maxAttacks || 1))
+          && !(unit.summonedThisTurn && !unit.keywords?.includes('RUSH'))
+          && !unit.hasChangedPositionThisTurn;
         if (canAttack) options.push({ label: '⚔ Attack', value: 'attack', icon: '⚔' });
       }
       // Main phase: switch position (once per turn, not after attacking)
@@ -2017,9 +1962,8 @@ export class GameUI {
       }
       // Main phase: activate ability (once per round effects)
       const isMainPhase2 = gs.phase === PHASES.MAIN1 || gs.phase === PHASES.MAIN2;
-      const canAbility = this.isOnline
-        ? (isMainPhase2 && !unit.activatedThisRound && !unit.activatedThisTurn)
-        : (isMainPhase2 && this.controller.actionValidator.canActivateAbility(player.id, unit).valid);
+      const hasActivatedAbility = unit.effectTriggers?.includes('ACTIVATED');
+      const canAbility = isMainPhase2 && hasActivatedAbility && !unit.activatedThisRound && !unit.activatedThisTurn;
       if (canAbility) {
         options.push({ label: '⚡ Activate', value: 'activate_ability', icon: '⚡' });
       }
@@ -2032,8 +1976,9 @@ export class GameUI {
       }
       // Allow face-down Traps with SELF trigger to be activated during Main Phase (e.g. E048)
       if (isMainPhase && spellTrap.type === 'Trap' && !spellTrap.setThisTurn) {
+        // Show activate option for traps with SELF trigger
+        // In online mode, we don't have effectEngine access, so show for all and let server validate
         if (this.isOnline) {
-          // In online mode, show option — server will validate
           options.push({ label: '⚡ Activate', value: 'activate_set_trap', icon: '⚡' });
         } else {
           const effects = this.controller.effectEngine.getEffects(spellTrap.cardId);
@@ -2060,15 +2005,21 @@ export class GameUI {
         // Check if unit is eligible for direct attack
         const opponents = gs.getOpponents(player.id);
         let directTarget = null;
-        // In online mode, simplified check; in local mode use combatEngine
+        // Check if unit can attack directly (same logic for both modes)
         for (const opp of opponents) {
           if (opp && opp.isAlive) {
-            if (this.isOnline) {
-              // Online: offer direct attack if opponent has no field units
-              if (opp.getFieldUnits().length === 0) { directTarget = opp; break; }
-            } else if (this.controller.combatEngine.canTarget(unit, { type: 'direct', player: opp })) {
+            const oppUnits = opp.getFieldUnits();
+            // Direct attack allowed if: no opponent units, or attacker has SHADOW and no shadow blockers
+            if (oppUnits.length === 0) {
               directTarget = opp;
               break;
+            }
+            if (unit.keywords?.includes('SHADOW')) {
+              const hasShadowBlocker = oppUnits.some(u => u.keywords?.includes('SHADOW'));
+              if (!hasShadowBlocker) {
+                directTarget = opp;
+                break;
+              }
             }
           }
         }
@@ -2139,9 +2090,10 @@ export class GameUI {
     const unit = player.getFieldUnits().find(u => u.instanceId === instanceId);
     if (!unit) return;
 
-    const canAttack = this.isOnline
-      ? (unit.position === 'ATK' && !unit.hasAttackedThisTurn && !unit.summonedThisTurn)
-      : this.controller.combatEngine.canAttack(unit);
+    const canAttack = unit.position === 'ATK'
+      && !(unit.hasAttackedThisTurn && (unit.attackCount || 1) >= (unit.maxAttacks || 1))
+      && !(unit.summonedThisTurn && !unit.keywords?.includes('RUSH'))
+      && !unit.hasChangedPositionThisTurn;
     if (canAttack) {
       this.attackingUnit = instanceId;
       this._showToast(`${unit.name} selected — click a target`);
@@ -2407,7 +2359,7 @@ export class GameUI {
         canActivate = result.valid;
         reason = result.reason || '';
       } else if (card.type === 'Spell') {
-        const result = validator.canActivateSetSpell(player.id, card);
+        const result = validator.canActivateSetSpell(player.id, card, { isResponse: true });
         canActivate = result.valid;
         reason = result.reason || '';
       }
@@ -2639,8 +2591,9 @@ export class GameUI {
     // ─── Detect mana changes (crystal animation) ───
     for (const p of gs.players) {
       const prevMana = this._lastMana[p.id];
-      if (prevMana !== undefined && p.mana !== prevMana) {
-        const diff = p.mana - prevMana;
+      const currentMana = (p.primaryMana || 0) + (p.spellMana || 0);
+      if (prevMana !== undefined && currentMana !== prevMana) {
+        const diff = currentMana - prevMana;
         setTimeout(() => {
           const manaEl = document.querySelector(`.player-bar[data-player="${p.id}"] .mana-display`);
           if (manaEl) {
@@ -2679,7 +2632,7 @@ export class GameUI {
       this._lastHandSizes[p.id] = p.hand.length;
       this._lastLP[p.id] = p.lp;
       this._lastFieldUnits[p.id] = p.getFieldUnits().map(u => u.instanceId);
-      this._lastMana[p.id] = p.mana;
+      this._lastMana[p.id] = (p.primaryMana || 0) + (p.spellMana || 0);
       // Track unit damage for flash animation
       for (const unit of p.getFieldUnits()) {
         this._lastUnitDamage[unit.instanceId] = unit.damageTaken;
@@ -2862,9 +2815,15 @@ export class GameUI {
       if (opponent._sealActive) continue;
       for (const unit of opponent.getFieldUnits()) {
         // In online mode, simplified targeting — all visible opponent units are valid
-        const isValid = this.isOnline
-          ? true
-          : this.controller.combatEngine.canTarget(attackerUnit, { type: 'unit', card: unit, player: opponent });
+        // Check targeting rules: taunt units (Jarl N021, Guardian Golem W020) must be attacked first
+        let isValid = true;
+        const oppUnits = opponent.getFieldUnits();
+        for (const u of oppUnits) {
+          if (u.silenced) continue;
+          if ((u.cardId === 'N021' || u.cardId === 'W020') && u.instanceId !== unit.instanceId) {
+            isValid = false; break;
+          }
+        }
         if (isValid) {
           const slotEl = document.querySelector(`.card-slot[data-instance="${unit.instanceId}"]`);
           if (slotEl) {
@@ -3017,29 +2976,66 @@ export class GameUI {
 
   showGameOver() {
     const gs = this._gs;
-    if (!gs) return;
-    const winner = gs.winner;
+    if (!gs && !this.isOnline) return;
 
     // Campaign mode: delegate to campaign UI
-    if (gs.gameMode === 'campaign' && this.campaignUI) {
+    if (gs && gs.gameMode === 'campaign' && this.campaignUI) {
       this.campaignUI._showPostBattle();
       return;
     }
 
     // War Campaign mode: delegate to war campaign UI
-    if (gs.gameMode === 'warCampaign' && this.warCampaignUI) {
+    if (gs && gs.gameMode === 'warCampaign' && this.warCampaignUI) {
+      const winner = gs.winner;
       const loser = gs.players.find(p => p.id !== (winner ? winner.id : null));
       this.warCampaignUI.handleWarCampaignGameOver(winner, loser);
       return;
     }
 
-    const isAI = gs.gameMode === 'ai';
-    const playerWon = winner && winner.id === 0;
-    const titleText = isAI ? (playerWon ? 'Victory!' : 'Defeat!') : 'Victory!';
-    const subtitleText = isAI
-      ? (playerWon ? 'You won the battle!' : 'AI Opponent defeated you.')
-      : (winner ? `${winner.name} wins the battle!` : 'Draw!');
-    const isDefeat = isAI && !playerWon;
+    // ─── Unified Game Over (both AI and Online) ───
+    const onlineMsg = this._onlineGameOverMsg || null;
+    this._onlineGameOverMsg = null; // Clear after use
+
+    // Determine win/loss
+    let playerWon, titleText, subtitleText, isDefeat;
+    let duration = 0, rounds = 0, turns = 0;
+    let playerInfos = [];
+
+    if (this.isOnline && onlineMsg) {
+      // Online mode — data comes from server msg
+      playerWon = onlineMsg.winner === this.myPlayerId;
+      titleText = playerWon ? 'Victory!' : 'Defeat!';
+      subtitleText = playerWon
+        ? 'You won the battle!'
+        : `${onlineMsg.winnerName || 'Opponent'} wins the battle!`;
+      isDefeat = !playerWon;
+      duration = onlineMsg.duration || 0; // Server already sends seconds
+      rounds = onlineMsg.rounds || 0;
+      turns = onlineMsg.turns || 0;
+      playerInfos = (onlineMsg.players || []).map(p => `${p.name} (${p.region}) — ${p.lp} LP`);
+    } else if (gs) {
+      // AI / local mode — data comes from game state
+      const winner = gs.winner;
+      const isAI = gs.gameMode === 'ai';
+      playerWon = winner && winner.id === 0;
+      titleText = isAI ? (playerWon ? 'Victory!' : 'Defeat!') : 'Victory!';
+      subtitleText = isAI
+        ? (playerWon ? 'You won the battle!' : 'AI Opponent defeated you.')
+        : (winner ? `${winner.name} wins the battle!` : 'Draw!');
+      isDefeat = isAI && !playerWon;
+      rounds = gs.roundCounter || 0;
+      turns = gs.turnCounter || 0;
+      // Calculate duration from match start if available
+      if (this._onlineMatchStartedAt) {
+        duration = Math.round((Date.now() - this._onlineMatchStartedAt) / 1000);
+      }
+      playerInfos = gs.players.map(p => `${p.name} (${p.region}) — ${p.lp} LP`);
+    } else {
+      return;
+    }
+
+    const minutes = Math.floor(duration / 60);
+    const seconds = duration % 60;
 
     this.app.innerHTML = `
       <div class="game-over ${isDefeat ? 'defeat' : ''}">
@@ -3048,7 +3044,29 @@ export class GameUI {
         ${!isDefeat ? '<div class="victory-particles" id="victory-particles"></div>' : ''}
         <h1>${titleText}</h1>
         <h2>${subtitleText}</h2>
-        <button class="menu-btn primary" id="btn-rematch" style="position:relative;z-index:1">Play Again</button>
+        <div style="display:flex;gap:24px;margin:16px 0;justify-content:center;flex-wrap:wrap;position:relative;z-index:1">
+          <div style="text-align:center">
+            <div style="font-size:1.5rem;font-weight:bold;color:var(--gold)">${minutes}:${seconds.toString().padStart(2, '0')}</div>
+            <div style="font-size:0.7rem;color:var(--text-muted)">Duration</div>
+          </div>
+          <div style="text-align:center">
+            <div style="font-size:1.5rem;font-weight:bold;color:var(--gold)">${rounds}</div>
+            <div style="font-size:0.7rem;color:var(--text-muted)">Rounds</div>
+          </div>
+          <div style="text-align:center">
+            <div style="font-size:1.5rem;font-weight:bold;color:var(--gold)">${turns}</div>
+            <div style="font-size:0.7rem;color:var(--text-muted)">Turns</div>
+          </div>
+        </div>
+        ${playerInfos.map(info => `
+          <div style="font-size:0.8rem;color:var(--text-secondary);position:relative;z-index:1">${info}</div>
+        `).join('')}
+        <div style="display:flex;gap:12px;margin-top:20px;position:relative;z-index:1">
+          ${this.isOnline
+        ? '<button class="menu-btn primary" id="btn-online-lobby">Return to Lobby</button><button class="menu-btn" id="btn-online-menu">☰ Main Menu</button>'
+        : '<button class="menu-btn primary" id="btn-rematch">Play Again</button>'
+      }
+        </div>
       </div>
     `;
     this._wireGlobalMenuButton();
@@ -3058,67 +3076,25 @@ export class GameUI {
       this._spawnVictoryParticles();
     }
 
-    document.getElementById('btn-rematch').onclick = () => {
-      this.playerConfigs = [];
-      this.selectedCard = null;
-      this.attackingUnit = null;
-      this.ai = null;
-      this._aiTurnInProgress = false;
-      this.showMenu();
-    };
-  }
-
-  /** Online game over with detailed stats */
-  _showOnlineGameOver(msg) {
-    const iWon = msg.winner === this.myPlayerId;
-    const titleText = iWon ? 'Victory!' : 'Defeat!';
-    const isDefeat = !iWon;
-    const duration = msg.duration ? Math.round(msg.duration / 1000) : 0;
-    const minutes = Math.floor(duration / 60);
-    const seconds = duration % 60;
-
-    this.app.innerHTML = `
-      <div class="game-over ${isDefeat ? 'defeat' : ''}">
-        ${isDefeat ? '<div class="defeat-vignette"></div>' : ''}
-        ${!isDefeat ? '<div class="victory-particles" id="victory-particles"></div>' : ''}
-        <h1>${titleText}</h1>
-        <h2>${msg.winnerName || ''} wins!</h2>
-        <div style="display:flex;gap:24px;margin:16px 0;justify-content:center;flex-wrap:wrap;position:relative;z-index:1">
-          <div style="text-align:center">
-            <div style="font-size:1.5rem;font-weight:bold;color:var(--gold)">${minutes}:${seconds.toString().padStart(2, '0')}</div>
-            <div style="font-size:0.7rem;color:var(--text-muted)">Duration</div>
-          </div>
-          <div style="text-align:center">
-            <div style="font-size:1.5rem;font-weight:bold;color:var(--gold)">${msg.rounds || 0}</div>
-            <div style="font-size:0.7rem;color:var(--text-muted)">Rounds</div>
-          </div>
-          <div style="text-align:center">
-            <div style="font-size:1.5rem;font-weight:bold;color:var(--gold)">${msg.turns || 0}</div>
-            <div style="font-size:0.7rem;color:var(--text-muted)">Turns</div>
-          </div>
-        </div>
-        ${(msg.players || []).map(p => `
-          <div style="font-size:0.8rem;color:var(--text-secondary);position:relative;z-index:1">${p.name} (${p.region}) — ${p.lp} LP</div>
-        `).join('')}
-        <div style="display:flex;gap:12px;margin-top:20px;position:relative;z-index:1">
-          <button class="menu-btn primary" id="btn-online-lobby">Return to Lobby</button>
-          <button class="menu-btn" id="btn-online-menu">☰ Main Menu</button>
-        </div>
-      </div>
-    `;
-
-    if (!isDefeat) this._spawnVictoryParticles();
-
-    document.getElementById('btn-online-lobby').onclick = () => {
-      this.endOnlineGame();
-      if (this.onlineUI) this.onlineUI.showLobby();
-    };
-
-    document.getElementById('btn-online-menu').onclick = () => {
-      if (this.net) this.net.disconnect();
-      this.endOnlineGame();
-      this.showMenu();
-    };
+    // Wire buttons based on mode
+    if (this.isOnline) {
+      document.getElementById('btn-online-lobby').onclick = () => {
+        this.endOnlineGame();
+        if (this.onlineUI) this.onlineUI.showLobby();
+      };
+      document.getElementById('btn-online-menu').onclick = () => {
+        if (this.net) this.net.disconnect();
+        this.endOnlineGame();
+        this.showMenu();
+      };
+    } else {
+      document.getElementById('btn-rematch').onclick = () => {
+        this.playerConfigs = [];
+        this.selectedCard = null;
+        this.attackingUnit = null;
+        this.showMenu();
+      };
+    }
   }
 
   /** Show disconnection screen */
