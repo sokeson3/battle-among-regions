@@ -27,8 +27,13 @@ function createWindow() {
     // Remove the default menu bar
     Menu.setApplicationMenu(null);
 
-    // Load the built Vite app from the dist folder
-    mainWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'));
+    // In dev mode, load from Vite dev server so production env vars aren't baked in
+    if (process.env.ELECTRON_DEV === 'true') {
+        mainWindow.loadURL('http://localhost:3000');
+    } else {
+        // Load the built Vite app from the dist folder
+        mainWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'));
+    }
 
     // Maximize on launch for a fullscreen game feel
     mainWindow.maximize();

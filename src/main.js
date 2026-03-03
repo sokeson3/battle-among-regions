@@ -10,6 +10,7 @@ import { WarCampaignUI } from './ui/WarCampaignUI.js';
 import { DuelDeckBuilderUI } from './ui/DuelDeckBuilderUI.js';
 import { TutorialUI } from './ui/TutorialUI.js';
 import { OnlineGameUI } from './ui/OnlineGameUI.js';
+import { OnlineWarCampaignUI } from './ui/OnlineWarCampaignUI.js';
 import * as NorthernEffects from './effects/NorthernEffects.js';
 import * as EasternEffects from './effects/EasternEffects.js';
 import * as WesternEffects from './effects/WesternEffects.js';
@@ -114,12 +115,15 @@ async function init() {
         () => ui.showMenu()
     );
     const onlineUI = new OnlineGameUI(ui, controller);
+    const onlineWarUI = new OnlineWarCampaignUI(ui, controller, onlineUI);
+    onlineUI.warUI = onlineWarUI;
 
     ui.campaignUI = campaignUI;
     ui.warCampaignUI = warCampaignUI;
     ui.tutorialUI = tutorialUI;
     ui.deckBuilderUI = deckBuilderUI;
     ui.onlineUI = onlineUI;
+    ui.onlineWarUI = onlineWarUI;
 
     ui.showMenu();
 

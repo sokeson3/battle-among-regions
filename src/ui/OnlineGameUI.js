@@ -5,6 +5,7 @@
 import { NetworkManager } from '../online/NetworkManager.js';
 import { PHASES } from '../engine/GameState.js';
 import * as SharedUI from './SharedUI.js';
+import { OnlineWarCampaignUI } from './OnlineWarCampaignUI.js';
 
 export class OnlineGameUI {
     /**
@@ -21,6 +22,7 @@ export class OnlineGameUI {
         this.roomCode = null;
         this.attackingUnit = null;
         this.pendingPlacement = null;
+        this.warUI = null; // Set after construction
     }
 
     // ─── Connection ──────────────────────────────────────────
@@ -48,6 +50,10 @@ export class OnlineGameUI {
         try {
             await this.net.connect(url);
             this._wireNetworkEvents();
+            // Wire war campaign events
+            if (this.warUI) {
+                this.warUI.wireWarEvents();
+            }
             return true;
         } catch (err) {
             console.error('Connection failed:', err);
@@ -153,6 +159,7 @@ export class OnlineGameUI {
                 <div class="menu-buttons">
                     <button class="menu-btn primary online-glow" id="btn-quick-match">⚡ Quick Match</button>
                     <button class="menu-btn" id="btn-private-match">🔒 Private Match</button>
+                    <button class="menu-btn campaign-glow" id="btn-war-campaign">⚔ War Campaign</button>
                     <button class="menu-btn" id="btn-back">← Back to Menu</button>
                 </div>
                 <div class="online-status" id="connection-status">
@@ -163,6 +170,11 @@ export class OnlineGameUI {
 
         document.getElementById('btn-quick-match').onclick = () => this._showQuickMatch();
         document.getElementById('btn-private-match').onclick = () => this._showPrivateMatch();
+        document.getElementById('btn-war-campaign').onclick = () => {
+            if (this.warUI) {
+                this.warUI.show();
+            }
+        };
         document.getElementById('btn-back').onclick = () => {
             this.net.disconnect();
             this.gameUI.showMenu();

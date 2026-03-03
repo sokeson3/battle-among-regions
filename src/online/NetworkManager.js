@@ -171,6 +171,32 @@ export class NetworkManager {
         this.send('OPPONENT_RESPONSE', { response });
     }
 
+    // ─── War Campaign Actions ────────────────────────────────
+
+    createWarRoom(playerName) {
+        this.send('CREATE_WAR_ROOM', { playerName });
+    }
+
+    joinWarRoom(roomCode, playerName) {
+        this.send('JOIN_WAR_ROOM', { roomCode, playerName });
+    }
+
+    selectWarRegion(region) {
+        this.send('WAR_REGION_SELECTED', { region });
+    }
+
+    warDraftSync(pool1Ids, pool2Ids) {
+        this.send('WAR_DRAFT_SYNC', { pool1Ids, pool2Ids });
+    }
+
+    warDeckReady(cardIds) {
+        this.send('WAR_DECK_READY', { cardIds });
+    }
+
+    warNextRound() {
+        this.send('WAR_NEXT_ROUND');
+    }
+
     // ─── Event System ────────────────────────────────────────
 
     on(event, cb) {

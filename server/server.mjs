@@ -12,6 +12,7 @@ import { readFileSync } from 'fs';
 
 // Import game engine
 import { GameController } from '../src/engine/GameController.js';
+import { WAR_ROUNDS_2P } from '../src/campaign/WarCampaignData.js';
 import * as NorthernEffects from '../src/effects/NorthernEffects.js';
 import * as EasternEffects from '../src/effects/EasternEffects.js';
 import * as WesternEffects from '../src/effects/WesternEffects.js';
@@ -145,6 +146,226 @@ class RoomManager {
 
     broadcast(room, type, data = {}) {
         for (const p of room.players) {
+            this.send(p.ws, type, data);
+        }
+    }
+}
+
+// ─── War Room Manager ────────────────────────────────────────
+
+class WarRoomManager {
+    constructor() {
+        this.rooms = new Map(); // roomCode -> WarRoom
+    }
+
+    generateCode() {
+        const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+        let code;
+        do {
+            code = '';
+            for (let i = 0; i < 4; i++) code += chars[Math.floor(Math.random() * chars.length)];
+        } while (this.rooms.has(code));
+        return code;
+    }
+
+    createWarRoom(ws, playerName) {
+        const code = this.generateCode();
+        const warRoom = {
+            code,
+            players: [{ ws, name: playerName, region: null, id: 0, vp: 0, deck: [], landmarkRewards: 0 }],
+            currentRound: 1,
+            roundResults: [],
+            fieldLandmarks: {},
+            phase: 'LOBBY',
+            gameRoom: null,       // reference to active game room in roomMgr
+            deckReadyCount: 0,
+            nextRoundReady: 0,
+        };
+        this.rooms.set(code, warRoom);
+        return warRoom;
+    }
+
+    joinWarRoom(code, ws, playerName) {
+        const warRoom = this.rooms.get(code);
+        if (!warRoom) return { error: 'War room not found.' };
+        if (warRoom.players.length >= 2) return { error: 'War room is full.' };
+        if (warRoom.phase !== 'LOBBY') return { error: 'Campaign already in progress.' };
+
+        warRoom.players.push({ ws, name: playerName, region: null, id: 1, vp: 0, deck: [], landmarkRewards: 0 });
+
+        // Auto-assign random unique regions
+        const allRegions = ['Northern', 'Eastern', 'Southern', 'Western'];
+        const shuffled = [...allRegions].sort(() => Math.random() - 0.5);
+        warRoom.players[0].region = shuffled[0];
+        warRoom.players[1].region = shuffled[1];
+
+        // Go straight to deck build (skip region select)
+        warRoom.phase = 'DECK_BUILD';
+        warRoom.draftSyncData = {}; // { playerId -> { pool1, pool2 } }
+        const roundDef = this.getRoundDef(warRoom);
+        for (const p of warRoom.players) {
+            const opp = warRoom.players.find(o => o.id !== p.id);
+            this.send(p.ws, 'WAR_DRAFT_START', {
+                yourRegion: p.region,
+                opponentRegion: opp.region,
+                opponentName: opp.name,
+                round: warRoom.currentRound,
+                roundDef,
+                standings: this.getStandings(warRoom),
+            });
+        }
+        console.log(`⚔ War room ${code}: ${warRoom.players[0].name} (${shuffled[0]}) vs ${warRoom.players[1].name} (${shuffled[1]})`);
+        return { warRoom };
+    }
+
+    handleDraftSync(warRoom, ws, pool1Ids, pool2Ids) {
+        const player = warRoom.players.find(p => p.ws === ws);
+        if (!player) return;
+
+        warRoom.draftSyncData[player.id] = { pool1Ids, pool2Ids };
+        this.send(ws, 'GAME_PHASE', { phase: 'WAITING', message: 'Waiting for opponent to finish drafting first pools...' });
+
+        // When both players have synced, exchange pools
+        if (Object.keys(warRoom.draftSyncData).length >= 2) {
+            for (const p of warRoom.players) {
+                const opp = warRoom.players.find(o => o.id !== p.id);
+                const oppSync = warRoom.draftSyncData[opp.id];
+                this.send(p.ws, 'WAR_DRAFT_CONTINUE', {
+                    pool1Ids: oppSync.pool1Ids,
+                    pool2Ids: oppSync.pool2Ids,
+                });
+            }
+            warRoom.draftSyncData = {};
+        }
+    }
+
+    handleDeckReady(warRoom, ws, cardIds) {
+        const player = warRoom.players.find(p => p.ws === ws);
+        if (!player) return;
+        player.deck = cardIds;
+        warRoom.deckReadyCount++;
+
+        this.send(ws, 'GAME_PHASE', { phase: 'WAITING', message: 'Waiting for opponent to finish drafting...' });
+
+        if (warRoom.deckReadyCount >= 2) {
+            warRoom.deckReadyCount = 0;
+            warRoom.phase = 'PLAYING';
+            return true; // signal to start the round
+        }
+        return false;
+    }
+
+    handleNextRound(warRoom, ws) {
+        warRoom.nextRoundReady++;
+        this.send(ws, 'GAME_PHASE', { phase: 'WAITING', message: 'Waiting for opponent...' });
+
+        if (warRoom.nextRoundReady >= 2) {
+            warRoom.nextRoundReady = 0;
+            warRoom.currentRound++;
+            warRoom.phase = 'DECK_BUILD';
+            warRoom.draftSyncData = {};
+            const roundDef = this.getRoundDef(warRoom);
+            for (const p of warRoom.players) {
+                const opp = warRoom.players.find(o => o.id !== p.id);
+                this.send(p.ws, 'WAR_DRAFT_START', {
+                    yourRegion: p.region,
+                    opponentRegion: opp.region,
+                    opponentName: opp.name,
+                    round: warRoom.currentRound,
+                    roundDef,
+                    standings: this.getStandings(warRoom),
+                    previousDeck: p.deck,
+                });
+            }
+            return true;
+        }
+        return false;
+    }
+
+    recordRoundResult(warRoom, winnerId) {
+        const roundDef = this.getRoundDef(warRoom);
+        warRoom.roundResults.push({ round: warRoom.currentRound, winnerId });
+
+        const winner = warRoom.players.find(p => p.id === winnerId);
+        if (winner) {
+            winner.vp += roundDef.vpWinner;
+            winner.landmarkRewards = roundDef.landmarkRewardWinner || 0;
+        }
+
+        const standings = this.getStandings(warRoom);
+        const isOver = this.isCampaignOver(warRoom);
+
+        warRoom.phase = isOver ? 'FINISHED' : 'INTERMISSION';
+
+        for (const p of warRoom.players) {
+            this.send(p.ws, 'WAR_ROUND_RESULT', {
+                round: warRoom.currentRound,
+                winnerId,
+                winnerName: winner ? winner.name : null,
+                standings,
+                isOver,
+                campaignWinner: isOver ? standings[0] : null,
+            });
+        }
+
+        if (isOver) {
+            this.rooms.delete(warRoom.code);
+        }
+    }
+
+    getRoundDef(warRoom) {
+        return WAR_ROUNDS_2P.find(r => r.round === warRoom.currentRound) || WAR_ROUNDS_2P[WAR_ROUNDS_2P.length - 1];
+    }
+
+    getStandings(warRoom) {
+        return [...warRoom.players]
+            .map(p => ({ id: p.id, name: p.name, region: p.region, vp: p.vp }))
+            .sort((a, b) => b.vp - a.vp);
+    }
+
+    isCampaignOver(warRoom) {
+        const standings = this.getStandings(warRoom);
+        if (warRoom.currentRound > 3) {
+            if (standings[0].vp > standings[1].vp) return true;
+            if (warRoom.currentRound > 4) return true;
+            return false;
+        }
+        if (warRoom.currentRound >= 3 && standings[0].vp >= 3) return true;
+        return false;
+    }
+
+    getWarRoomByWs(ws) {
+        for (const room of this.rooms.values()) {
+            if (room.players.some(p => p.ws === ws)) return room;
+        }
+        return null;
+    }
+
+    removePlayer(ws) {
+        for (const [code, room] of this.rooms) {
+            const idx = room.players.findIndex(p => p.ws === ws);
+            if (idx !== -1) {
+                room.players.splice(idx, 1);
+                for (const p of room.players) {
+                    this.send(p.ws, 'OPPONENT_DISCONNECTED', { message: 'Opponent disconnected from war campaign.' });
+                }
+                if (room.players.length === 0) {
+                    this.rooms.delete(code);
+                }
+                return room;
+            }
+        }
+        return null;
+    }
+
+    send(ws, type, data = {}) {
+        if (ws.readyState === 1) {
+            ws.send(JSON.stringify({ type, ...data }));
+        }
+    }
+
+    broadcast(warRoom, type, data = {}) {
+        for (const p of warRoom.players) {
             this.send(p.ws, type, data);
         }
     }
@@ -307,6 +528,116 @@ async function startGame(room, roomMgr, csvText) {
     }
 
     checkLandmarksComplete(room, roomMgr);
+}
+
+// ─── Start War Round ─────────────────────────────────────────
+
+async function startWarRound(warRoom, warRoomMgr, roomMgr, csvText) {
+    const roundDef = warRoomMgr.getRoundDef(warRoom);
+    const controller = new GameController();
+    await controller.loadCards(csvText);
+    controller.registerEffects([NorthernEffects, EasternEffects, WesternEffects, SouthernEffects]);
+
+    // Build player configs with custom decks
+    const playerConfigs = warRoom.players.map(p => ({
+        name: p.name,
+        region: p.region,
+        customDeck: p.deck,
+    }));
+
+    // Create a game room in the regular RoomManager for action handling
+    const gameRoom = {
+        code: warRoom.code + '_R' + warRoom.currentRound,
+        players: warRoom.players.map(p => ({ ws: p.ws, name: p.name, region: p.region, id: p.id })),
+        controller: controller,
+        phase: 'LANDMARK',
+        landmarkSelections: {},
+        mulliganDone: {},
+        warRoom: warRoom, // link back to the war room
+    };
+    roomMgr.rooms.set(gameRoom.code, gameRoom);
+    warRoom.gameRoom = gameRoom;
+
+    // Wire up callbacks for interactive effects (same as startGame)
+    controller.effectEngine.onTargetRequired = (targets, desc, cb) => {
+        const activeId = controller.gameState.activePlayerIndex;
+        const activeP = gameRoom.players.find(p => p.id === activeId);
+        if (!activeP) { cb(targets[0]); return; }
+        gameRoom.pendingTargetCb = cb;
+        gameRoom.pendingTargetPlayerId = activeId;
+        const serializedTargets = targets.map(t => ({
+            instanceId: t.instanceId, cardId: t.cardId, name: t.name, type: t.type,
+        }));
+        roomMgr.send(activeP.ws, 'REQUEST_TARGET', { targets: serializedTargets, description: desc });
+    };
+
+    controller.effectEngine.onChoiceRequired = (options, desc, cb) => {
+        const activeId = controller.gameState.activePlayerIndex;
+        const activeP = gameRoom.players.find(p => p.id === activeId);
+        if (!activeP) { cb(options[0]); return; }
+        gameRoom.pendingChoiceCb = cb;
+        gameRoom.pendingChoicePlayerId = activeId;
+        roomMgr.send(activeP.ws, 'REQUEST_CHOICE', { options, description: desc });
+    };
+
+    controller.onOpponentResponse = (player, cb) => {
+        const p = gameRoom.players.find(rp => rp.id === player.id);
+        if (!p) { cb({ activate: false }); return; }
+        const faceDownCards = player.getFaceDownCards().filter(c => c.type === 'Spell' || c.type === 'Trap');
+        if (faceDownCards.length === 0) { cb({ activate: false }); return; }
+        gameRoom.pendingResponseCb = cb;
+        gameRoom.pendingResponsePlayerId = player.id;
+        const serialized = faceDownCards.map(c => serializeCard(c));
+        roomMgr.send(p.ws, 'REQUEST_RESPONSE', { faceDownCards: serialized });
+    };
+
+    controller.onUIUpdate = () => {
+        broadcastGameState(gameRoom, roomMgr);
+    };
+
+    // Set up the game with war campaign settings
+    await controller.setupGame(playerConfigs, {
+        gameMode: 'warCampaign',
+        startingLP: roundDef.lp,
+    });
+
+    // Pre-place persisted landmarks from previous rounds
+    const gs = controller.gameState;
+    for (const player of gs.players) {
+        const savedLandmark = warRoom.fieldLandmarks[player.id];
+        if (savedLandmark) {
+            const card = controller.cardDB.getCard(savedLandmark.cardId);
+            if (card) {
+                const instance = gs.createCardInstance(card);
+                instance.faceUp = true;
+                player.landmarkZone = instance;
+                gs.log('LANDMARK', `${player.name}'s Landmark ${card.name} persists from previous round.`);
+            }
+        }
+    }
+
+    // Move to landmark phase
+    gameRoom.landmarkSelections = {};
+    for (const p of gameRoom.players) {
+        const player = gs.getPlayerById(p.id);
+        const seenCardIds = new Set();
+        const landmarks = player.deck.filter(c => {
+            if (c.type !== 'Landmark') return false;
+            if (seenCardIds.has(c.cardId)) return false;
+            seenCardIds.add(c.cardId);
+            return true;
+        });
+
+        if (landmarks.length === 0) {
+            gameRoom.landmarkSelections[p.id] = { skip: true };
+            roomMgr.send(p.ws, 'GAME_PHASE', { phase: 'LANDMARK', landmarks: [] });
+        } else {
+            const serialized = landmarks.map(c => serializeCard(c));
+            roomMgr.send(p.ws, 'REQUEST_LANDMARK', { landmarks: serialized });
+        }
+    }
+
+    checkLandmarksComplete(gameRoom, roomMgr);
 }
 
 function checkLandmarksComplete(room, roomMgr) {
@@ -488,10 +819,26 @@ async function handleAction(room, ws, msg, roomMgr) {
 
                 // Check game over
                 if (gs.gameOver) {
-                    roomMgr.broadcast(room, 'GAME_OVER', {
-                        winner: gs.winner,
-                        winnerName: gs.winner !== null ? gs.getPlayerById(gs.winner)?.name : null,
-                    });
+                    // War campaign: route result to WarRoomManager
+                    if (room.warRoom) {
+                        // Save landmarks for next round
+                        for (const player of gs.players) {
+                            if (player.landmarkZone) {
+                                room.warRoom.fieldLandmarks[player.id] = {
+                                    cardId: player.landmarkZone.cardId,
+                                };
+                            }
+                        }
+                        warRoomMgr.recordRoundResult(room.warRoom, gs.winner);
+                        // Clean up the game room
+                        roomMgr.rooms.delete(room.code);
+                        room.warRoom.gameRoom = null;
+                    } else {
+                        roomMgr.broadcast(room, 'GAME_OVER', {
+                            winner: gs.winner,
+                            winnerName: gs.winner !== null ? gs.getPlayerById(gs.winner)?.name : null,
+                        });
+                    }
                 } else {
                     // Broadcast turn change
                     broadcastGameState(room, roomMgr);
@@ -524,10 +871,24 @@ async function handleAction(room, ws, msg, roomMgr) {
 
     // Check game over after any action
     if (gs.gameOver) {
-        roomMgr.broadcast(room, 'GAME_OVER', {
-            winner: gs.winner,
-            winnerName: gs.winner !== null ? gs.getPlayerById(gs.winner)?.name : null,
-        });
+        if (room.warRoom) {
+            // Save landmarks for next round
+            for (const player of gs.players) {
+                if (player.landmarkZone) {
+                    room.warRoom.fieldLandmarks[player.id] = {
+                        cardId: player.landmarkZone.cardId,
+                    };
+                }
+            }
+            warRoomMgr.recordRoundResult(room.warRoom, gs.winner);
+            roomMgr.rooms.delete(room.code);
+            room.warRoom.gameRoom = null;
+        } else {
+            roomMgr.broadcast(room, 'GAME_OVER', {
+                winner: gs.winner,
+                winnerName: gs.winner !== null ? gs.getPlayerById(gs.winner)?.name : null,
+            });
+        }
     }
 }
 
@@ -560,6 +921,7 @@ app.get('/{*splat}', (req, res) => {
 // WebSocket server
 const wss = new WebSocketServer({ server });
 const roomMgr = new RoomManager();
+const warRoomMgr = new WarRoomManager();
 
 // Load CSV for game setup
 let csvText;
@@ -660,7 +1022,57 @@ wss.on('connection', (ws) => {
                 break;
             }
 
+            case 'CREATE_WAR_ROOM': {
+                const warRoom = warRoomMgr.createWarRoom(ws, msg.playerName || 'Player 1');
+                warRoomMgr.send(ws, 'WAR_ROOM_CREATED', { roomCode: warRoom.code });
+                console.log(`⚔ War Room ${warRoom.code} created by ${msg.playerName}`);
+                break;
+            }
+
+            case 'JOIN_WAR_ROOM': {
+                const wCode = (msg.roomCode || '').toUpperCase().trim();
+                const wResult = warRoomMgr.joinWarRoom(wCode, ws, msg.playerName || 'Player 2');
+                if (wResult.error) {
+                    warRoomMgr.send(ws, 'ERROR', { message: wResult.error });
+                }
+                // joinWarRoom now auto-assigns regions and sends WAR_DRAFT_START
+                break;
+            }
+
+            case 'WAR_DRAFT_SYNC': {
+                const warRoom = warRoomMgr.getWarRoomByWs(ws);
+                if (warRoom && warRoom.phase === 'DECK_BUILD') {
+                    warRoomMgr.handleDraftSync(warRoom, ws, msg.pool1Ids || [], msg.pool2Ids || []);
+                }
+                break;
+            }
+
+            case 'WAR_DECK_READY': {
+                const warRoom = warRoomMgr.getWarRoomByWs(ws);
+                if (warRoom) {
+                    const ready = warRoomMgr.handleDeckReady(warRoom, ws, msg.cardIds || []);
+                    if (ready) {
+                        try {
+                            await startWarRound(warRoom, warRoomMgr, roomMgr, csvText);
+                        } catch (err) {
+                            console.error('Failed to start war round:', err);
+                            warRoomMgr.broadcast(warRoom, 'ERROR', { message: 'Failed to start war round: ' + err.message });
+                        }
+                    }
+                }
+                break;
+            }
+
+            case 'WAR_NEXT_ROUND': {
+                const warRoom = warRoomMgr.getWarRoomByWs(ws);
+                if (warRoom && warRoom.phase === 'INTERMISSION') {
+                    warRoomMgr.handleNextRound(warRoom, ws);
+                }
+                break;
+            }
+
             default: {
+                // Check regular game rooms first, then war rooms
                 const room = roomMgr.getRoomByWs(ws);
                 if (room) {
                     try {
@@ -681,6 +1093,7 @@ wss.on('connection', (ws) => {
         console.log('🔌 WebSocket disconnected');
         roomMgr.removeFromQueue(ws);
         roomMgr.removePlayer(ws);
+        warRoomMgr.removePlayer(ws);
     });
 
     ws.on('error', (err) => {
