@@ -1,11 +1,13 @@
 // ─────────────────────────────────────────────────────────────
 // GameUI.js — Renders the game board and handles interactions
+// Handles both AI (local controller) and Online (network) modes
 // ─────────────────────────────────────────────────────────────
 
 import { PHASES } from '../engine/GameState.js';
 import { DuelDeckBuilderUI } from './DuelDeckBuilderUI.js';
 import { AIPlayer } from '../engine/AIPlayer.js';
 import * as SharedUI from './SharedUI.js';
+import * as MatchHistory from '../online/MatchHistory.js';
 
 export class GameUI {
   /**
@@ -26,6 +28,13 @@ export class GameUI {
     this.tutorialUI = null; // Set externally by main.js
     this.deckBuilderUI = null; // Set externally by main.js
 
+    // ─── Online mode properties ──────────────────────────────
+    this.isOnline = false;          // True when playing online
+    this.net = null;                // NetworkManager reference
+    this.myPlayerId = null;         // Player ID assigned by server
+    this._onlineState = null;       // Hydrated server state
+    this._onlineMatchStartedAt = null; // For duration tracking
+
     // Animation tracking
     this._lastHandSizes = {};       // Track hand sizes per player for draw detection
     this._pendingPlayAnim = null;   // { rect, imgSrc } captured before play action
@@ -43,11 +52,251 @@ export class GameUI {
     this._lastUnitDamage = {};       // Track unit damage for damage flash
     this._fieldParticlesCreated = false; // Prevent duplicate field particles
 
-    // Wire up callbacks
+    // Wire up callbacks (for local/AI mode — online mode wires these differently)
     controller.onUIUpdate = (gs) => this._onUIUpdate(gs);
     controller.effectEngine.onTargetRequired = (targets, desc, cb) => this.showTargetSelection(targets, desc, cb);
     controller.effectEngine.onChoiceRequired = (options, desc, cb) => this.showChoiceDialog(options, desc, cb);
     controller.onOpponentResponse = (player, callback, chainContext) => this.showOpponentResponseDialog(player, callback, chainContext);
+  }
+
+  // ─── Unified State Access ────────────────────────────────
+
+  /** Returns the current game state — either local controller or hydrated online state */
+  get _gs() {
+    return this.isOnline ? this._onlineState : this.controller.gameState;
+  }
+
+  /** Hydrate serialized JSON state from server with helper methods */
+  _hydrateOnlineState(state) {
+    if (!state || !state.players) return state;
+    state.getActivePlayer = () => state.players[state.activePlayerIndex];
+    state.getPlayerById = (id) => state.players[id] || null;
+    state.getOpponents = (id) => state.players.filter(p => p.id !== id && p.isAlive);
+    state.getOpponent = (id) => {
+      const opps = state.players.filter(p => p.id !== id && p.isAlive);
+      return opps[0] || null;
+    };
+    state.getAlivePlayers = () => state.players.filter(p => p.isAlive);
+    state.isPlayersTurn = (id) => state.activePlayerIndex === id;
+    state.findCardOnField = (instanceId) => {
+      for (const player of state.players) {
+        for (let i = 0; i < 5; i++) {
+          if (player.unitZone[i]?.instanceId === instanceId)
+            return { card: player.unitZone[i], zone: 'unit', index: i, player };
+          if (player.spellTrapZone[i]?.instanceId === instanceId)
+            return { card: player.spellTrapZone[i], zone: 'spellTrap', index: i, player };
+        }
+        if (player.landmarkZone?.instanceId === instanceId)
+          return { card: player.landmarkZone, zone: 'landmark', index: 0, player };
+      }
+      return null;
+    };
+    state.findCardInHand = (playerId, instanceId) => {
+      const player = state.players[playerId];
+      if (!player) return null;
+      return player.hand.find(c => c.instanceId === instanceId) || null;
+    };
+    state.log = (type, message) => {
+      if (!state.eventLog) state.eventLog = [];
+      state.eventLog.push({ type, message, timestamp: Date.now(), turn: state.turnCounter, round: state.roundCounter, phase: state.phase });
+    };
+    // Hydrate player objects
+    for (const p of state.players) {
+      if (!p.getFieldUnits) {
+        p.getFieldUnits = () => p.unitZone.filter(c => c !== null);
+        p.getFaceDownCards = () => p.spellTrapZone.filter(c => c && !c.faceUp);
+        p.getSetCards = () => p.spellTrapZone.filter(c => c !== null);
+        p.getEmptyUnitSlot = () => p.unitZone.findIndex(s => s === null);
+        p.getEmptySpellTrapSlot = () => p.spellTrapZone.findIndex(s => s === null);
+        p.getTotalMana = () => p.primaryMana + p.spellMana;
+      }
+    }
+    return state;
+  }
+
+  // ─── Online Game Lifecycle ───────────────────────────────
+
+  /** Called by OnlineGameUI when a match starts. Takes over all in-game rendering. */
+  startOnlineGame(net, myPlayerId) {
+    this.isOnline = true;
+    this.net = net;
+    this.myPlayerId = myPlayerId;
+    this._onlineState = null;
+    this._onlineMatchStartedAt = Date.now();
+    this.currentScreen = 'game';
+    this.attackingUnit = null;
+    this.pendingPlacement = null;
+    this.selectedCard = null;
+    // Reset animation tracking
+    this._lastHandSizes = {};
+    this._lastLP = {};
+    this._lastFieldUnits = {};
+    this._lastFieldSpellTraps = {};
+    this._lastMana = {};
+    this._lastUnitDamage = {};
+    this._wireOnlineGameEvents();
+  }
+
+  /** Reset online mode and return to local/AI mode. */
+  endOnlineGame() {
+    this.isOnline = false;
+    this.net = null;
+    this.myPlayerId = null;
+    this._onlineState = null;
+    this._onlineMatchStartedAt = null;
+  }
+
+  /** Wire network events for in-game phase. Called by startOnlineGame(). */
+  _wireOnlineGameEvents() {
+    const net = this.net;
+
+    net.on('REQUEST_LANDMARK', (msg) => {
+      this.showLandmarkSelect(-1, msg.landmarks);
+    });
+
+    net.on('REQUEST_MULLIGAN', (msg) => {
+      this.showMulliganScreen(-1, msg.hand);
+    });
+
+    net.on('GAME_PHASE', (msg) => {
+      if (msg.phase === 'WAITING') {
+        this._showOnlineWaiting(msg.message || 'Waiting for opponent...');
+      } else if (msg.phase === 'LANDMARK' && msg.landmarks && msg.landmarks.length === 0) {
+        net.send('SELECT_LANDMARK', { cardInstanceId: null });
+        this._showOnlineWaiting('Waiting for opponent to select a landmark...');
+      }
+    });
+
+    net.on('GAME_STATE', (msg) => {
+      this.myPlayerId = msg.yourPlayerId;
+      const prevState = this._onlineState;
+      this._onlineState = this._hydrateOnlineState(msg.state);
+      if (this._onlineState.phase !== 'SETUP' && this._onlineState.phase !== 'MULLIGAN') {
+        this._onUIUpdate(this._onlineState);
+      }
+    });
+
+    net.on('TURN_CHANGE', (msg) => {
+      if (!this._onlineState) return;
+      this._onlineState.activePlayerIndex = msg.activePlayerId;
+      if (msg.round) this._onlineState.roundCounter = msg.round;
+      if (msg.turn) this._onlineState.turnCounter = msg.turn;
+      this.showTurnTransition(null, null, msg);
+    });
+
+    net.on('REQUEST_TARGET', (msg) => {
+      this.showTargetSelection(msg.targets, msg.description, (target) => {
+        if (target) net.send('TARGET_SELECTED', { targetId: target.instanceId });
+      });
+    });
+
+    net.on('REQUEST_CHOICE', (msg) => {
+      this.showChoiceDialog(msg.options, msg.description, (choice) => {
+        net.send('CHOICE_MADE', { choice });
+      });
+    });
+
+    net.on('REQUEST_RESPONSE', (msg) => {
+      const cards = msg.faceDownCards.map(c => ({ instanceId: c.instanceId, cardId: c.cardId, name: c.name, type: c.type, manaCost: c.manaCost }));
+      SharedUI.showResponseDialog(document.body, cards, (result) => {
+        net.send('OPPONENT_RESPONSE', { response: result });
+      });
+    });
+
+    net.on('TOAST', (msg) => {
+      this._showToast(msg.message);
+    });
+
+    net.on('ACTION_RESULT', (msg) => {
+      if (!msg.success && msg.reason) {
+        this._showToast(msg.reason);
+      }
+    });
+
+    net.on('GAME_OVER', (msg) => {
+      // Persist match result
+      MatchHistory.saveMatch({
+        date: new Date().toISOString(),
+        duration: msg.duration || 0,
+        rounds: msg.rounds || 0,
+        turns: msg.turns || 0,
+        winner: msg.winner,
+        winnerName: msg.winnerName,
+        myPlayerId: this.myPlayerId,
+        players: msg.players || [],
+      });
+      this._showOnlineGameOver(msg);
+    });
+
+    net.on('ERROR', (msg) => {
+      this._showToast(msg.message || 'An error occurred.');
+    });
+
+    net.on('OPPONENT_DISCONNECTED', (msg) => {
+      this._showDisconnected(msg.message);
+    });
+
+    net.on('disconnected', () => {
+      this._showDisconnected('Connection to server lost.');
+    });
+  }
+
+  /** Show a waiting screen during online play */
+  _showOnlineWaiting(message) {
+    this.app.innerHTML = `
+      <div class="main-menu online-lobby">
+        <div class="waiting-animation">
+          <div class="waiting-dots"><span></span><span></span><span></span></div>
+          <p>${message}</p>
+        </div>
+      </div>
+    `;
+  }
+
+  /** Route an action to either the local controller or the network */
+  async _doAction(type, ...args) {
+    if (this.isOnline) {
+      switch (type) {
+        case 'playUnit': this.net.playUnit(...args); break;
+        case 'playSpell': this.net.playSpell(...args); break;
+        case 'setSpell': this.net.setSpell(...args); break;
+        case 'setTrap': this.net.setTrap(...args); break;
+        case 'playLandmark': this.net.playLandmark(...args); break;
+        case 'activateSetSpell': this.net.activateSetSpell(...args); break;
+        case 'activateTrap': this.net.activateTrap(...args); break;
+        case 'declareAttack': this.net.declareAttack(...args); break;
+        case 'activateAbility': this.net.activateAbility(...args); break;
+        case 'changePosition': this.net.changePosition(...args); break;
+        case 'enterBattlePhase': this.net.enterBattle(); break;
+        case 'exitBattlePhase': this.net.exitBattle(); break;
+        case 'endTurn': this.net.endTurn(); break;
+        default: console.warn('Unknown online action:', type);
+      }
+      return { success: true }; // Server validates
+    }
+    // Local mode — call controller directly
+    const fn = this.controller[type];
+    if (fn) return fn.call(this.controller, ...args);
+    return { success: false, reason: 'Unknown action' };
+  }
+
+  /** Check if it's the local player's turn (works in both modes) */
+  _isMyTurn() {
+    const gs = this._gs;
+    if (!gs) return false;
+    if (this.isOnline) return gs.activePlayerIndex === this.myPlayerId;
+    // In AI/campaign mode, player 0 is the human
+    if (gs.gameMode === 'ai' || gs.gameMode === 'campaign') return gs.activePlayerIndex === 0;
+    return true; // Duel/other modes — always the active player's turn to act
+  }
+
+  /** Get the local player (bottom of screen) */
+  _getLocalPlayer() {
+    const gs = this._gs;
+    if (!gs) return null;
+    if (this.isOnline) return gs.players[this.myPlayerId];
+    const isFixedPerspective = gs.gameMode === 'campaign' || gs.gameMode === 'ai';
+    return isFixedPerspective ? gs.players[0] : gs.getActivePlayer();
   }
 
   // ─── Screen Management ────────────────────────────────────
@@ -57,6 +306,7 @@ export class GameUI {
     const isFullscreen = !!document.fullscreenElement;
     this.app.innerHTML = `
       <div class="main-menu">
+        <span class="version-label">v1.01</span>
         <button class="settings-btn" id="btn-settings" title="Settings">⚙</button>
         <h1 class="menu-title">Battle Among Regions</h1>
         <p class="menu-subtitle">War for Supremacy</p>
@@ -453,7 +703,62 @@ export class GameUI {
 
   // ─── Pre-Mulligan Landmark Selection ────────────────────────
 
-  showLandmarkSelect(playerIndex) {
+  showLandmarkSelect(playerIndex, onlineLandmarks = null) {
+    // Online mode: landmarks come from the server
+    if (this.isOnline && onlineLandmarks) {
+      const landmarks = onlineLandmarks;
+      if (landmarks.length === 0) {
+        this.net.send('SELECT_LANDMARK', { cardInstanceId: null });
+        this._showOnlineWaiting('Waiting for opponent to select a landmark...');
+        return;
+      }
+
+      this.app.innerHTML = `
+        <div class="mulligan-screen">
+          <h2>Select a Landmark</h2>
+          <p>Choose a Landmark to play for free, or skip</p>
+          <div class="mulligan-cards">
+            ${landmarks.map(card => `
+              <div class="game-card mulligan-card ${this._getRegionClass(card.region)}"
+                   data-id="${card.instanceId}" data-card-id="${card.cardId}"
+                   style="width:150px;height:210px;position:relative;cursor:pointer">
+                ${this._renderCardVisual(card)}
+              </div>
+            `).join('')}
+          </div>
+          <div style="display:flex;gap:16px;align-items:center;margin-top:16px">
+            <button class="action-btn primary" id="btn-accept-landmark" style="opacity:0.5;pointer-events:none">Accept</button>
+            <button class="action-btn" id="btn-skip-landmark">Skip</button>
+          </div>
+        </div>
+      `;
+
+      let selectedInstanceId = null;
+
+      document.querySelectorAll('.mulligan-card').forEach(el => {
+        el.onclick = () => {
+          document.querySelectorAll('.mulligan-card').forEach(c => c.classList.remove('landmark-selected'));
+          el.classList.add('landmark-selected');
+          selectedInstanceId = el.dataset.id;
+          const btnAccept = document.getElementById('btn-accept-landmark');
+          if (btnAccept) { btnAccept.style.opacity = '1'; btnAccept.style.pointerEvents = 'auto'; }
+        };
+      });
+
+      document.getElementById('btn-accept-landmark').onclick = () => {
+        if (!selectedInstanceId) return;
+        this.net.send('SELECT_LANDMARK', { cardInstanceId: selectedInstanceId });
+        this._showOnlineWaiting('Waiting for opponent...');
+      };
+
+      document.getElementById('btn-skip-landmark').onclick = () => {
+        this.net.send('SELECT_LANDMARK', { cardInstanceId: null });
+        this._showOnlineWaiting('Waiting for opponent...');
+      };
+      return;
+    }
+
+    // ─── Local mode (AI/duel/campaign) ───
     const gs = this.controller.gameState;
     const player = gs.getPlayerById(playerIndex);
     if (!player) {
@@ -590,7 +895,53 @@ export class GameUI {
 
   // ─── Mulligan Screen ──────────────────────────────────────
 
-  showMulliganScreen(playerIndex) {
+  showMulliganScreen(playerIndex, onlineHand = null) {
+    // Online mode: hand comes from the server
+    if (this.isOnline && onlineHand) {
+      const hand = onlineHand;
+      const selectedIds = new Set();
+
+      const renderMulligan = () => {
+        this.app.innerHTML = `
+          <div class="mulligan-screen">
+            <h2>Mulligan Phase</h2>
+            <p>Select cards to replace (click to toggle)</p>
+            <div class="mulligan-cards">
+              ${hand.map(card => `
+                <div class="game-card mulligan-card ${this._getRegionClass(card.region)} ${selectedIds.has(card.instanceId) ? 'selected' : ''}"
+                     data-id="${card.instanceId}" style="width:110px;height:154px;position:relative">
+                  ${this._renderCardVisual(card)}
+                </div>
+              `).join('')}
+            </div>
+            <div style="display:flex;gap:16px;align-items:center">
+              <button class="action-btn primary" id="btn-accept-mulligan">
+                ${selectedIds.size === 0 ? 'Accept Hand' : `Remove ${selectedIds.size} Card${selectedIds.size !== 1 ? 's' : ''}`}
+              </button>
+            </div>
+          </div>
+        `;
+
+        document.querySelectorAll('.mulligan-card').forEach(el => {
+          el.onclick = () => {
+            const id = el.dataset.id;
+            if (selectedIds.has(id)) selectedIds.delete(id);
+            else selectedIds.add(id);
+            renderMulligan();
+          };
+        });
+
+        document.getElementById('btn-accept-mulligan').onclick = () => {
+          this.net.send('MULLIGAN', { cardInstanceIds: [...selectedIds] });
+          this._showOnlineWaiting('Waiting for opponent...');
+        };
+      };
+
+      renderMulligan();
+      return;
+    }
+
+    // ─── Local mode (AI/duel/campaign) ───
     const gs = this.controller.gameState;
     const player = gs.getPlayerById(playerIndex);
     if (!player || player.hasMulliganed) {
@@ -668,8 +1019,22 @@ export class GameUI {
 
   // ─── Turn Transition ──────────────────────────────────────
 
-  showTurnTransition(onContinue = null, overridePlayer = null) {
-    const gs = this.controller.gameState;
+  showTurnTransition(onContinue = null, overridePlayer = null, onlineMsg = null) {
+    // Online mode turn transition
+    if (this.isOnline && onlineMsg) {
+      const isMyTurn = onlineMsg.activePlayerId === this.myPlayerId;
+      const label = isMyTurn ? 'Your Turn' : "Opponent's Turn";
+      const roundInfo = onlineMsg.round ? `Round ${onlineMsg.round}` : '';
+
+      this._showTurnBanner(label, roundInfo);
+      // After short delay, re-render the board
+      setTimeout(() => this.render(), 500);
+      return;
+    }
+
+    // ─── Local mode ───
+    const gs = this._gs;
+    if (!gs) return;
     const player = overridePlayer || gs.getActivePlayer();
     const regionClass = this._getRegionClass(player.region);
 
@@ -698,8 +1063,10 @@ export class GameUI {
     // Clean up any orphaned floating UI elements
     document.querySelectorAll('.popup-hover-preview, .card-flying, .hand-select-banner, .turn-banner, .destruction-particle, .mana-crystal-float, .chain-flash').forEach(e => e.remove());
 
-    const gs = this.controller.gameState;
+    const gs = this._gs;
+    if (!gs) return;
     if (gs.gameOver) {
+      if (this.isOnline) return; // Online game over handled by GAME_OVER event
       this.showGameOver();
       return;
     }
@@ -709,9 +1076,10 @@ export class GameUI {
     const numPlayers = players.length;
 
     // In campaign/ai mode, always show from human player's perspective (player 0)
+    // In online mode, always show from our player's perspective
     // In other modes, active player is rendered at bottom
-    const isFixedPerspective = gs.gameMode === 'campaign' || gs.gameMode === 'ai';
-    const p1 = isFixedPerspective ? players[0] : active;
+    const isFixedPerspective = gs.gameMode === 'campaign' || gs.gameMode === 'ai' || this.isOnline;
+    const p1 = this.isOnline ? gs.players[this.myPlayerId] : (isFixedPerspective ? players[0] : active);
     // Opponents are everyone else (alive or dead for display)
     const opponents = players.filter(p => p.id !== p1.id);
 
@@ -991,7 +1359,7 @@ export class GameUI {
       <div class="side-zone">
         <div class="deck-pile" style="position:relative; overflow:hidden; background-image:url('./Background.webp'); background-size:cover; background-position:center; border-radius:var(--radius-card); outline:1px solid rgba(255,255,255,0.2);">
           <div style="position:absolute; inset:0; background:rgba(0,0,0,0.15);"></div>
-          <span style="position:relative; z-index:1; background:rgba(0,0,0,0.75); padding:2px 8px; border-radius:4px; font-weight:bold; box-shadow:0 0 4px rgba(0,0,0,0.8);">${player.deck.length}</span>
+          <span style="position:relative; z-index:1; background:rgba(0,0,0,0.75); padding:2px 8px; border-radius:4px; font-weight:bold; box-shadow:0 0 4px rgba(0,0,0,0.8);">${player.deckCount !== undefined ? player.deckCount : (player.deck ? player.deck.length : 0)}</span>
         </div>
         <span class="zone-count">Deck</span>
         <div class="graveyard-pile" data-player="${player.id}" style="cursor:pointer" title="Click to view graveyard">${player.graveyard.length}</div>
@@ -1060,22 +1428,34 @@ export class GameUI {
   }
 
   _renderHand(player) {
-    const gs = this.controller.gameState;
+    const gs = this._gs;
     const isMainPhase = gs.phase === PHASES.MAIN1 || gs.phase === PHASES.MAIN2;
-    // During AI turn, player cannot play cards
-    const isAITurn = (gs.gameMode === 'ai' || gs.gameMode === 'campaign') && gs.activePlayerIndex !== 0;
+    const canAct = this._isMyTurn();
 
     return `
       <div class="hand-container">
         <div class="hand-label" style="text-align:center;font-size:0.7rem;color:var(--text-muted);margin-bottom:2px">Hand (${player.hand.length})</div>
         <div class="hand-cards">
           ${player.hand.map(card => {
-      const canPlay = !isAITurn && isMainPhase && (
-        (card.type === 'Unit' && this.controller.actionValidator.canPlayUnit(player.id, card).valid) ||
-        (card.type === 'Spell' && (this.controller.actionValidator.canPlaySpell(player.id, card).valid || this.controller.actionValidator.canSetSpell(player.id, card).valid)) ||
-        (card.type === 'Trap' && this.controller.actionValidator.canSetTrap(player.id, card).valid) ||
-        (card.type === 'Landmark' && this.controller.actionValidator.canPlayLandmark(player.id, card).valid)
-      );
+      // Handle hidden cards (opponent's hand in online mode)
+      if (card.hidden) {
+        return `<div class="hand-card game-card face-down" style="width:var(--card-w);height:var(--card-h)">
+          <img class="card-image" src="./Background.webp" alt="Hidden" style="width:100%;height:100%;object-fit:cover;border-radius:var(--radius-card)" />
+        </div>`;
+      }
+
+      let canPlay;
+      if (this.isOnline) {
+        // Online: simplified — server validates
+        canPlay = canAct && isMainPhase;
+      } else {
+        canPlay = canAct && isMainPhase && (
+          (card.type === 'Unit' && this.controller.actionValidator.canPlayUnit(player.id, card).valid) ||
+          (card.type === 'Spell' && (this.controller.actionValidator.canPlaySpell(player.id, card).valid || this.controller.actionValidator.canSetSpell(player.id, card).valid)) ||
+          (card.type === 'Trap' && this.controller.actionValidator.canSetTrap(player.id, card).valid) ||
+          (card.type === 'Landmark' && this.controller.actionValidator.canPlayLandmark(player.id, card).valid)
+        );
+      }
 
       const handStatTokens = this._renderStatTokens(card);
       return `
@@ -1152,9 +1532,9 @@ export class GameUI {
   }
 
   _renderActionPanel(gs) {
-    // During AI turn, hide action buttons — player cannot act
-    if ((gs.gameMode === 'ai' || gs.gameMode === 'campaign') && gs.activePlayerIndex !== 0) {
-      return `<div class="action-panel"></div>`;
+    // During AI/online opponent turn, hide action buttons — player cannot act
+    if (!this._isMyTurn()) {
+      return `<div class="action-panel"><span class="waiting-label">${this.isOnline ? "Opponent's Turn" : ''}</span></div>`;
     }
 
     const phase = gs.phase;
@@ -1272,8 +1652,8 @@ export class GameUI {
       };
 
       handContainer.onclick = (e) => {
-        // Block hand interactions during AI turn
-        if ((gs.gameMode === 'ai' || gs.gameMode === 'campaign') && gs.activePlayerIndex !== 0) return;
+        // Block hand interactions when it's not our turn
+        if (!this._isMyTurn()) return;
         if (this.pendingPlacement) {
           this._showToast('Cancel placement before doing something else.');
           return;
@@ -1293,8 +1673,8 @@ export class GameUI {
 
       el.onclick = (e) => {
         e.stopPropagation();
-        // Block field card interactions during AI turn (allow zoom only)
-        if ((gs.gameMode === 'ai' || gs.gameMode === 'campaign') && gs.activePlayerIndex !== 0) {
+        // Block field card interactions when it's not our turn (allow zoom only)
+        if (!this._isMyTurn()) {
           if (!el.classList.contains('face-down')) {
             this._showCardZoom(cardId || el.querySelector('img')?.alt);
           }
@@ -1359,29 +1739,29 @@ export class GameUI {
         if (p.type === 'Unit' && isUnitZone) {
           // Summon circle effect on the slot
           this._showSummonCircle(el);
-          this.controller.playUnit(p.player.id, p.cardInstanceId, p.position, slotIdx).then(r => {
-            if (!r.success) this._showToast(r.reason);
+          this._doAction('playUnit', p.player.id, p.cardInstanceId, p.position, slotIdx).then(r => {
+            if (r && !r.success) this._showToast(r.reason);
           }).catch(err => {
             console.error('playUnit threw an exception:', err);
             this._showToast('Error playing unit. See console.');
           });
         } else if (p.type === 'SpellSet' && isSpellTrapZone) {
-          this.controller.setSpell(p.player.id, p.cardInstanceId, slotIdx).then(r => {
-            if (!r.success) this._showToast(r.reason);
+          this._doAction('setSpell', p.player.id, p.cardInstanceId, slotIdx).then(r => {
+            if (r && !r.success) this._showToast(r.reason);
           }).catch(err => {
             console.error('setSpell threw:', err);
             this._showToast('Error setting spell.');
           });
         } else if (p.type === 'TrapSet' && isSpellTrapZone) {
-          this.controller.setTrap(p.player.id, p.cardInstanceId, slotIdx).then(r => {
-            if (!r.success) this._showToast(r.reason);
+          this._doAction('setTrap', p.player.id, p.cardInstanceId, slotIdx).then(r => {
+            if (r && !r.success) this._showToast(r.reason);
           }).catch(err => {
             console.error('setTrap threw:', err);
             this._showToast('Error setting trap.');
           });
         } else if (p.type === 'Landmark' && isLandmarkSlot) {
-          this.controller.playLandmark(p.player.id, p.cardInstanceId, playerId).then(r => {
-            if (!r.success) this._showToast(r.reason);
+          this._doAction('playLandmark', p.player.id, p.cardInstanceId, playerId).then(r => {
+            if (r && !r.success) this._showToast(r.reason);
           }).catch(err => {
             console.error('playLandmark threw:', err);
             this._showToast('Error playing landmark.');
@@ -1404,8 +1784,12 @@ export class GameUI {
     const btnEndBattle = document.getElementById('btn-endbattle');
     const btnCancelAction = document.getElementById('btn-cancel-action');
 
-    if (btnBattle) btnBattle.onclick = () => this.controller.enterBattlePhase();
+    if (btnBattle) btnBattle.onclick = () => this._doAction('enterBattlePhase');
     if (btnEndTurn) btnEndTurn.onclick = () => {
+      if (this.isOnline) {
+        this._doAction('endTurn');
+        return;
+      }
       this.controller.endTurn().then(() => {
         if (gs.gameOver) {
           if (gs.gameMode === 'campaign' && this.campaignUI) {
@@ -1436,7 +1820,7 @@ export class GameUI {
         }
       });
     };
-    if (btnEndBattle) btnEndBattle.onclick = () => this.controller.exitBattlePhase();
+    if (btnEndBattle) btnEndBattle.onclick = () => this._doAction('exitBattlePhase');
     if (btnCancelAction) btnCancelAction.onclick = () => {
       this.attackingUnit = null;
       this.pendingPlacement = null;
@@ -1451,6 +1835,10 @@ export class GameUI {
         'Are you sure you want to leave the game?',
         (choice) => {
           if (choice.value === 'yes') {
+            if (this.isOnline && this.net) {
+              this.net.disconnect();
+              this.endOnlineGame();
+            }
             this.playerConfigs = [];
             this.selectedCard = null;
             this.attackingUnit = null;
@@ -1500,13 +1888,13 @@ export class GameUI {
     if (cardType === 'Unit') {
       // YGO-style: Summon in ATK or Set in DEF
       const options = [];
-      const canSummon = this.controller.actionValidator.canPlayUnit(player.id, card).valid;
+      const canSummon = this.isOnline ? true : this.controller.actionValidator.canPlayUnit(player.id, card).valid;
       if (canSummon) {
         options.push({ label: '⚔ Summon in ATK', value: 'atk', icon: '⚔' });
         options.push({ label: '🛡 Set in DEF', value: 'def', icon: '🛡' });
       }
       if (options.length === 0) {
-        this._showToast(this.controller.actionValidator.canPlayUnit(player.id, card).reason || 'Cannot play this card.');
+        this._showToast((!this.isOnline && this.controller.actionValidator.canPlayUnit(player.id, card).reason) || 'Cannot play this card.');
         return;
       }
       this._showCardActionMenu(rect, options, (choice) => {
@@ -1527,8 +1915,8 @@ export class GameUI {
     } else if (cardType === 'Spell') {
       // YGO-style: Activate or Set face-down
       const options = [];
-      const canActivate = this.controller.actionValidator.canPlaySpell(player.id, card).valid;
-      const canSet = this.controller.actionValidator.canSetSpell(player.id, card).valid;
+      const canActivate = this.isOnline ? true : this.controller.actionValidator.canPlaySpell(player.id, card).valid;
+      const canSet = this.isOnline ? true : this.controller.actionValidator.canSetSpell(player.id, card).valid;
       if (canActivate) options.push({ label: '✦ Activate', value: 'activate', icon: '✦' });
       if (canSet) options.push({ label: '⬇ Set', value: 'set', icon: '⬇' });
       if (options.length === 0) {
@@ -1538,8 +1926,8 @@ export class GameUI {
       this._showCardActionMenu(rect, options, (choice) => {
         if (choice.value === 'activate') {
           this._pendingPlayAnim = { rect: el.getBoundingClientRect(), imgSrc };
-          this.controller.playSpell(player.id, instanceId).then(r => {
-            if (!r.success) this._showToast(r.reason);
+          this._doAction('playSpell', player.id, instanceId).then(r => {
+            if (r && !r.success) this._showToast(r.reason);
           });
         } else {
           this.pendingPlacement = {
@@ -1556,9 +1944,9 @@ export class GameUI {
 
     } else if (cardType === 'Trap') {
       // Traps can only be Set face-down
-      const canSet = this.controller.actionValidator.canSetTrap(player.id, card).valid;
+      const canSet = this.isOnline ? true : this.controller.actionValidator.canSetTrap(player.id, card).valid;
       if (!canSet) {
-        this._showToast(this.controller.actionValidator.canSetTrap(player.id, card).reason || 'Cannot set this Trap.');
+        this._showToast((!this.isOnline && this.controller.actionValidator.canSetTrap(player.id, card).reason) || 'Cannot set this Trap.');
         return;
       }
       this._showCardActionMenu(rect, [
@@ -1576,9 +1964,9 @@ export class GameUI {
       });
 
     } else if (cardType === 'Landmark') {
-      const canPlay = this.controller.actionValidator.canPlayLandmark(player.id, card).valid;
+      const canPlay = this.isOnline ? true : this.controller.actionValidator.canPlayLandmark(player.id, card).valid;
       if (!canPlay) {
-        this._showToast(this.controller.actionValidator.canPlayLandmark(player.id, card).reason || 'Cannot play this Landmark.');
+        this._showToast((!this.isOnline && this.controller.actionValidator.canPlayLandmark(player.id, card).reason) || 'Cannot play this Landmark.');
         return;
       }
       this._showCardActionMenu(rect, [
@@ -1615,8 +2003,11 @@ export class GameUI {
 
     if (unit) {
       // Battle phase: attack option
-      if (gs.phase === PHASES.BATTLE && this.controller.combatEngine.canAttack(unit)) {
-        options.push({ label: '⚔ Attack', value: 'attack', icon: '⚔' });
+      if (gs.phase === PHASES.BATTLE) {
+        const canAttack = this.isOnline
+          ? (unit.position === 'ATK' && !unit.hasAttackedThisTurn && !unit.summonedThisTurn)
+          : this.controller.combatEngine.canAttack(unit);
+        if (canAttack) options.push({ label: '⚔ Attack', value: 'attack', icon: '⚔' });
       }
       // Main phase: switch position (once per turn, not after attacking)
       const isMainPhase = gs.phase === PHASES.MAIN1 || gs.phase === PHASES.MAIN2;
@@ -1626,7 +2017,10 @@ export class GameUI {
       }
       // Main phase: activate ability (once per round effects)
       const isMainPhase2 = gs.phase === PHASES.MAIN1 || gs.phase === PHASES.MAIN2;
-      if (isMainPhase2 && this.controller.actionValidator.canActivateAbility(player.id, unit).valid) {
+      const canAbility = this.isOnline
+        ? (isMainPhase2 && !unit.activatedThisRound && !unit.activatedThisTurn)
+        : (isMainPhase2 && this.controller.actionValidator.canActivateAbility(player.id, unit).valid);
+      if (canAbility) {
         options.push({ label: '⚡ Activate', value: 'activate_ability', icon: '⚡' });
       }
     }
@@ -1638,15 +2032,20 @@ export class GameUI {
       }
       // Allow face-down Traps with SELF trigger to be activated during Main Phase (e.g. E048)
       if (isMainPhase && spellTrap.type === 'Trap' && !spellTrap.setThisTurn) {
-        const effects = this.controller.effectEngine.getEffects(spellTrap.cardId);
-        const hasSelfTrigger = effects.some(e => e.trigger === 'SELF');
-        if (hasSelfTrigger) {
-          const canAct = this.controller.actionValidator.canActivateTrap(player.id, spellTrap, {
-            effectEngine: this.controller.effectEngine,
-            triggerContext: {}
-          });
-          if (canAct.valid) {
-            options.push({ label: '⚡ Activate', value: 'activate_set_trap', icon: '⚡' });
+        if (this.isOnline) {
+          // In online mode, show option — server will validate
+          options.push({ label: '⚡ Activate', value: 'activate_set_trap', icon: '⚡' });
+        } else {
+          const effects = this.controller.effectEngine.getEffects(spellTrap.cardId);
+          const hasSelfTrigger = effects.some(e => e.trigger === 'SELF');
+          if (hasSelfTrigger) {
+            const canAct = this.controller.actionValidator.canActivateTrap(player.id, spellTrap, {
+              effectEngine: this.controller.effectEngine,
+              triggerContext: {}
+            });
+            if (canAct.valid) {
+              options.push({ label: '⚡ Activate', value: 'activate_set_trap', icon: '⚡' });
+            }
           }
         }
       }
@@ -1661,10 +2060,16 @@ export class GameUI {
         // Check if unit is eligible for direct attack
         const opponents = gs.getOpponents(player.id);
         let directTarget = null;
+        // In online mode, simplified check; in local mode use combatEngine
         for (const opp of opponents) {
-          if (opp && opp.isAlive && this.controller.combatEngine.canTarget(unit, { type: 'direct', player: opp })) {
-            directTarget = opp;
-            break;
+          if (opp && opp.isAlive) {
+            if (this.isOnline) {
+              // Online: offer direct attack if opponent has no field units
+              if (opp.getFieldUnits().length === 0) { directTarget = opp; break; }
+            } else if (this.controller.combatEngine.canTarget(unit, { type: 'direct', player: opp })) {
+              directTarget = opp;
+              break;
+            }
           }
         }
 
@@ -1678,11 +2083,11 @@ export class GameUI {
               if (dialogChoice.value === 'yes') {
                 // Direct attack on LP
                 this._showAttackAnimation(unit, null, directTarget);
-                this.controller.declareAttack(player.id, instanceId, {
+                this._doAction('declareAttack', player.id, instanceId, {
                   type: 'direct',
                   player: directTarget,
                 }).then(result => {
-                  if (!result.success) this._showToast(result.reason);
+                  if (result && !result.success) this._showToast(result.reason);
                 });
               } else if (isShadow && hasOpponentUnits) {
                 // Shadow unit: enter target selection to pick a unit
@@ -1709,20 +2114,20 @@ export class GameUI {
           cardEl.classList.add(newPos === 'DEF' ? 'switching-to-def' : 'switching-to-atk');
           setTimeout(() => cardEl.classList.remove('switching-to-def', 'switching-to-atk'), 350);
         }
-        this.controller.changePosition(player.id, instanceId).then(r => {
-          if (!r.success) this._showToast(r.reason);
+        this._doAction('changePosition', player.id, instanceId).then(r => {
+          if (r && !r.success) this._showToast(r.reason);
         });
       } else if (choice.value === 'activate_set') {
-        this.controller.activateSetSpell(player.id, instanceId).then(r => {
-          if (!r.success) this._showToast(r.reason);
+        this._doAction('activateSetSpell', player.id, instanceId).then(r => {
+          if (r && !r.success) this._showToast(r.reason);
         });
       } else if (choice.value === 'activate_set_trap') {
-        this.controller.activateTrap(player.id, instanceId).then(r => {
-          if (!r.success) this._showToast(r.reason);
+        this._doAction('activateTrap', player.id, instanceId).then(r => {
+          if (r && !r.success) this._showToast(r.reason);
         });
       } else if (choice.value === 'activate_ability') {
-        this.controller.activateAbility(player.id, instanceId).then(r => {
-          if (!r.success) this._showToast(r.reason);
+        this._doAction('activateAbility', player.id, instanceId).then(r => {
+          if (r && !r.success) this._showToast(r.reason);
         });
       } else if (choice.value === 'zoom') {
         this._showCardZoom(cardId);
@@ -1734,7 +2139,10 @@ export class GameUI {
     const unit = player.getFieldUnits().find(u => u.instanceId === instanceId);
     if (!unit) return;
 
-    if (this.controller.combatEngine.canAttack(unit)) {
+    const canAttack = this.isOnline
+      ? (unit.position === 'ATK' && !unit.hasAttackedThisTurn && !unit.summonedThisTurn)
+      : this.controller.combatEngine.canAttack(unit);
+    if (canAttack) {
       this.attackingUnit = instanceId;
       this._showToast(`${unit.name} selected — click a target`);
       this.render();
@@ -1750,12 +2158,12 @@ export class GameUI {
       this.attackingUnit = null;
       this._removeAttackHighlights();
       this._showAttackAnimation(attackerUnit, target, null);
-      this.controller.declareAttack(gs.activePlayerIndex, attackerInstanceId, {
+      this._doAction('declareAttack', gs.activePlayerIndex, attackerInstanceId, {
         type: 'unit',
         card: target,
         player: opponent,
       }).then(result => {
-        if (!result.success) this._showToast(result.reason);
+        if (result && !result.success) this._showToast(result.reason);
       });
     }
   }
@@ -1976,15 +2384,20 @@ export class GameUI {
     overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:70;display:flex;align-items:center;justify-content:center';
 
     // Check which cards can be activated (mana check + condition check)
-    const validator = this.controller.actionValidator;
-    const effectEngine = this.controller.effectEngine;
+    // In online mode, server already validated — treat all as activatable
     const triggerContext = chainContext.triggerContext || {};
     const triggerType = chainContext.triggerType || 'action';
     const chainStack = chainContext.chainStack || [];
 
     const cardStates = faceDownCards.map(card => {
+      if (this.isOnline) {
+        // Server already filtered which cards can respond — all are activatable
+        return { card, canActivate: true, reason: '' };
+      }
       let canActivate = false;
       let reason = '';
+      const validator = this.controller.actionValidator;
+      const effectEngine = this.controller.effectEngine;
       if (card.type === 'Trap') {
         const result = validator.canActivateTrap(player.id, card, {
           effectEngine,
@@ -2426,7 +2839,8 @@ export class GameUI {
   _highlightAttackTargets() {
     this._removeAttackHighlights();
 
-    const gs = this.controller.gameState;
+    const gs = this._gs;
+    if (!gs) return;
     const activePlayer = gs.getActivePlayer();
     const attackerUnit = activePlayer.getFieldUnits().find(u => u.instanceId === this.attackingUnit);
     if (!attackerUnit) return;
@@ -2447,7 +2861,11 @@ export class GameUI {
     for (const opponent of opponents) {
       if (opponent._sealActive) continue;
       for (const unit of opponent.getFieldUnits()) {
-        if (this.controller.combatEngine.canTarget(attackerUnit, { type: 'unit', card: unit, player: opponent })) {
+        // In online mode, simplified targeting — all visible opponent units are valid
+        const isValid = this.isOnline
+          ? true
+          : this.controller.combatEngine.canTarget(attackerUnit, { type: 'unit', card: unit, player: opponent });
+        if (isValid) {
           const slotEl = document.querySelector(`.card-slot[data-instance="${unit.instanceId}"]`);
           if (slotEl) {
             slotEl.style.outline = '3px solid #ffd700';
@@ -2598,7 +3016,8 @@ export class GameUI {
   // ─── Game Over ────────────────────────────────────────────
 
   showGameOver() {
-    const gs = this.controller.gameState;
+    const gs = this._gs;
+    if (!gs) return;
     const winner = gs.winner;
 
     // Campaign mode: delegate to campaign UI
@@ -2645,6 +3064,74 @@ export class GameUI {
       this.attackingUnit = null;
       this.ai = null;
       this._aiTurnInProgress = false;
+      this.showMenu();
+    };
+  }
+
+  /** Online game over with detailed stats */
+  _showOnlineGameOver(msg) {
+    const iWon = msg.winner === this.myPlayerId;
+    const titleText = iWon ? 'Victory!' : 'Defeat!';
+    const isDefeat = !iWon;
+    const duration = msg.duration ? Math.round(msg.duration / 1000) : 0;
+    const minutes = Math.floor(duration / 60);
+    const seconds = duration % 60;
+
+    this.app.innerHTML = `
+      <div class="game-over ${isDefeat ? 'defeat' : ''}">
+        ${isDefeat ? '<div class="defeat-vignette"></div>' : ''}
+        ${!isDefeat ? '<div class="victory-particles" id="victory-particles"></div>' : ''}
+        <h1>${titleText}</h1>
+        <h2>${msg.winnerName || ''} wins!</h2>
+        <div style="display:flex;gap:24px;margin:16px 0;justify-content:center;flex-wrap:wrap;position:relative;z-index:1">
+          <div style="text-align:center">
+            <div style="font-size:1.5rem;font-weight:bold;color:var(--gold)">${minutes}:${seconds.toString().padStart(2, '0')}</div>
+            <div style="font-size:0.7rem;color:var(--text-muted)">Duration</div>
+          </div>
+          <div style="text-align:center">
+            <div style="font-size:1.5rem;font-weight:bold;color:var(--gold)">${msg.rounds || 0}</div>
+            <div style="font-size:0.7rem;color:var(--text-muted)">Rounds</div>
+          </div>
+          <div style="text-align:center">
+            <div style="font-size:1.5rem;font-weight:bold;color:var(--gold)">${msg.turns || 0}</div>
+            <div style="font-size:0.7rem;color:var(--text-muted)">Turns</div>
+          </div>
+        </div>
+        ${(msg.players || []).map(p => `
+          <div style="font-size:0.8rem;color:var(--text-secondary);position:relative;z-index:1">${p.name} (${p.region}) — ${p.lp} LP</div>
+        `).join('')}
+        <div style="display:flex;gap:12px;margin-top:20px;position:relative;z-index:1">
+          <button class="menu-btn primary" id="btn-online-lobby">Return to Lobby</button>
+          <button class="menu-btn" id="btn-online-menu">☰ Main Menu</button>
+        </div>
+      </div>
+    `;
+
+    if (!isDefeat) this._spawnVictoryParticles();
+
+    document.getElementById('btn-online-lobby').onclick = () => {
+      this.endOnlineGame();
+      if (this.onlineUI) this.onlineUI.showLobby();
+    };
+
+    document.getElementById('btn-online-menu').onclick = () => {
+      if (this.net) this.net.disconnect();
+      this.endOnlineGame();
+      this.showMenu();
+    };
+  }
+
+  /** Show disconnection screen */
+  _showDisconnected(message) {
+    this.app.innerHTML = `
+      <div class="main-menu online-lobby">
+        <h2 style="color: #ef5350">🔌 Disconnected</h2>
+        <p style="color: var(--text-secondary)">${message || 'Connection lost.'}</p>
+        <button class="menu-btn primary" id="btn-dc-menu">☰ Main Menu</button>
+      </div>
+    `;
+    document.getElementById('btn-dc-menu').onclick = () => {
+      this.endOnlineGame();
       this.showMenu();
     };
   }

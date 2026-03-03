@@ -185,8 +185,8 @@ export class NetworkManager {
         this.send('WAR_REGION_SELECTED', { region });
     }
 
-    warDraftSync(pool1Ids, pool2Ids) {
-        this.send('WAR_DRAFT_SYNC', { pool1Ids, pool2Ids });
+    warDraftSync(pool1Ids, pool2Ids, extraPools = []) {
+        this.send('WAR_DRAFT_SYNC', { pool1Ids, pool2Ids, extraPools });
     }
 
     warDeckReady(cardIds) {

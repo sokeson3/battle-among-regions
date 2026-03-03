@@ -218,6 +218,19 @@ body {
   border-color: rgba(255, 213, 79, 0.3);
 }
 
+/* ─── Version Label ──────────────────────────────────── */
+
+.version-label {
+  position: absolute;
+  top: 36px;
+  right: 80px;
+  z-index: 110;
+  font-family: 'Orbitron', monospace;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  letter-spacing: 1px;
+}
+
 /* ─── Settings Button ────────────────────────────────── */
 
 .settings-btn {
@@ -4259,14 +4272,17 @@ body {
 
 .tutorial-mode-cards {
   display: flex;
-  gap: 28px;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 20px;
   position: relative;
   z-index: 1;
+  max-width: 900px;
 }
 
 .tutorial-mode-card {
-  width: 280px;
-  padding: 32px 24px;
+  width: 160px;
+  padding: 24px 16px;
   border-radius: var(--radius-lg);
   border: 2px solid var(--glass-border);
   background: var(--bg-panel);
@@ -5155,6 +5171,695 @@ body {
 .tut-pick-region {
   font-weight: 600;
   color: var(--text-primary);
+}
+
+/* ─── Additional Tutorial Hub Card Colors ──────────── */
+
+.tutorial-mode-card.card-types:hover {
+  border-color: var(--mana-purple);
+  box-shadow: 0 0 30px rgba(186, 104, 200, 0.25), var(--shadow-lg);
+}
+
+.tutorial-mode-card.card-types h3 {
+  color: var(--mana-purple);
+}
+
+.tutorial-mode-card.mana:hover {
+  border-color: var(--mana-blue);
+  box-shadow: 0 0 30px rgba(79, 195, 247, 0.25), var(--shadow-lg);
+}
+
+.tutorial-mode-card.mana h3 {
+  color: var(--mana-blue);
+}
+
+.tutorial-mode-card.combat:hover {
+  border-color: var(--atk-color);
+  box-shadow: 0 0 30px rgba(255, 107, 107, 0.25), var(--shadow-lg);
+}
+
+.tutorial-mode-card.combat h3 {
+  color: var(--atk-color);
+}
+
+/* ─── Clickable Phase Detail ──────────────────────── */
+
+.tut-phase-click {
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.tut-phase-click:hover {
+  border-color: rgba(255, 213, 79, 0.3);
+  background: rgba(255, 213, 79, 0.04);
+  transform: translateY(-2px);
+}
+
+.tut-phase-detail {
+  margin-top: 16px;
+  padding: 16px 20px;
+  border-radius: var(--radius-md);
+  background: rgba(255, 213, 79, 0.04);
+  border: 1px solid rgba(255, 213, 79, 0.12);
+  min-height: 60px;
+}
+
+.tut-phase-detail p {
+  margin: 0;
+  font-size: 0.9rem;
+  line-height: 1.6;
+}
+
+/* ─── Interactive Demo Container ──────────────────── */
+
+.tut-interactive-demo {
+  margin: 20px 0;
+  padding: 20px;
+  border-radius: var(--radius-lg);
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid var(--glass-border);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.tut-interactive-demo:hover {
+  border-color: rgba(255, 213, 79, 0.2);
+  box-shadow: 0 0 20px rgba(255, 213, 79, 0.05);
+}
+
+.tut-demo-label {
+  font-size: 0.8rem !important;
+  color: var(--gold) !important;
+  text-align: center;
+  margin-bottom: 12px !important;
+  letter-spacing: 0.5px;
+}
+
+.tut-demo-btn {
+  font-family: 'Cinzel', serif;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  background: linear-gradient(135deg, rgba(255, 213, 79, 0.15), rgba(255, 183, 77, 0.08));
+  border: 1px solid rgba(255, 213, 79, 0.3);
+  border-radius: var(--radius-sm);
+  padding: 8px 20px;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.tut-demo-btn:hover {
+  border-color: var(--gold);
+  box-shadow: 0 0 15px rgba(255, 213, 79, 0.2);
+  transform: translateY(-1px);
+}
+
+/* ─── LP Demo ─────────────────────────────────────── */
+
+.tut-lp-demo {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  justify-content: center;
+}
+
+.tut-lp-bar-track {
+  width: 300px;
+  height: 24px;
+  background: rgba(0, 0, 0, 0.5);
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid var(--glass-border);
+}
+
+.tut-lp-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #43a047, #66bb6a);
+  border-radius: 12px;
+  transition: width 0.4s ease;
+  box-shadow: 0 0 10px rgba(102, 187, 106, 0.4);
+}
+
+.tut-lp-bar-fill.tut-damage-flash {
+  background: linear-gradient(90deg, #c62828, #ef5350) !important;
+}
+
+.tut-lp-text {
+  font-family: 'Orbitron', monospace;
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--lp-green);
+  min-width: 120px;
+}
+
+/* ─── Mock Card ───────────────────────────────────── */
+
+.tut-mock-card {
+  padding: 16px;
+  border-radius: var(--radius-md);
+  background: rgba(26, 29, 46, 0.9);
+  border: 2px solid var(--glass-border);
+  text-align: center;
+  min-width: 120px;
+}
+
+.tut-mock-card-name {
+  font-family: 'Cinzel', serif;
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+}
+
+.tut-mock-card-stats {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.tut-mock-atk {
+  font-family: 'Orbitron', monospace;
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--atk-color);
+}
+
+.tut-mock-def {
+  font-family: 'Orbitron', monospace;
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--def-color);
+}
+
+.tut-unit-demo {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 24px;
+}
+
+.tut-demo-status {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  min-width: 200px;
+}
+
+/* ─── Region Hover Detail ─────────────────────────── */
+
+.tut-region-detail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 0.3s ease, opacity 0.3s ease;
+  opacity: 0;
+}
+
+.tut-region-hover:hover .tut-region-detail {
+  max-height: 60px;
+  opacity: 1;
+}
+
+.tut-region-detail span {
+  font-size: 0.7rem;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: var(--text-secondary);
+}
+
+/* ─── Position Demo ───────────────────────────────── */
+
+.tut-position-demo {
+  display: flex;
+  align-items: stretch;
+  gap: 16px;
+  margin: 16px 0;
+}
+
+.tut-pos-card {
+  flex: 1;
+  padding: 20px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--glass-border);
+  text-align: center;
+}
+
+.tut-pos-card.atk-pos {
+  background: rgba(255, 107, 107, 0.06);
+  border-color: rgba(255, 107, 107, 0.2);
+}
+
+.tut-pos-card.def-pos {
+  background: rgba(79, 195, 247, 0.06);
+  border-color: rgba(79, 195, 247, 0.2);
+}
+
+.tut-pos-visual {
+  font-size: 2rem;
+  margin-bottom: 8px;
+}
+
+.tut-pos-visual.sideways {
+  display: inline-block;
+  transform: rotate(90deg);
+}
+
+.tut-pos-card h4 {
+  font-family: 'Cinzel', serif;
+  font-size: 1rem;
+  margin-bottom: 6px;
+}
+
+.tut-pos-card.atk-pos h4 {
+  color: var(--atk-color);
+}
+
+.tut-pos-card.def-pos h4 {
+  color: var(--def-color);
+}
+
+.tut-pos-card p {
+  font-size: 0.82rem;
+  margin: 0 0 10px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+
+.tut-pos-vs {
+  display: flex;
+  align-items: center;
+  font-family: 'Orbitron', monospace;
+  font-weight: 700;
+  font-size: 1.2rem;
+  color: var(--text-muted);
+}
+
+.tut-pos-tag {
+  font-family: 'Orbitron', monospace;
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 4px 12px;
+  border-radius: 12px;
+  display: inline-block;
+}
+
+.tut-pos-tag.atk {
+  background: rgba(255, 107, 107, 0.15);
+  color: var(--atk-color);
+}
+
+.tut-pos-tag.def {
+  background: rgba(79, 195, 247, 0.15);
+  color: var(--def-color);
+}
+
+/* ─── Spell Mode Diagram ──────────────────────────── */
+
+.tut-spell-modes {
+  display: flex;
+  gap: 16px;
+  margin: 16px 0;
+}
+
+.tut-spell-mode {
+  flex: 1;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--glass-border);
+  overflow: hidden;
+}
+
+.tut-spell-mode-header {
+  padding: 10px 16px;
+  font-family: 'Cinzel', serif;
+  font-weight: 700;
+  font-size: 0.9rem;
+  text-align: center;
+}
+
+.tut-spell-mode-header.cast {
+  background: rgba(186, 104, 200, 0.12);
+  color: var(--mana-purple);
+  border-bottom: 1px solid rgba(186, 104, 200, 0.2);
+}
+
+.tut-spell-mode-header.set {
+  background: rgba(100, 100, 120, 0.12);
+  color: var(--text-secondary);
+  border-bottom: 1px solid rgba(100, 100, 120, 0.2);
+}
+
+.tut-spell-mode ul {
+  list-style: none;
+  padding: 12px 16px;
+}
+
+.tut-spell-mode li {
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+  padding: 4px 0;
+  line-height: 1.4;
+}
+
+.tut-spell-mode li::before {
+  content: '•';
+  color: var(--text-muted);
+  margin-right: 8px;
+}
+
+/* ─── Flip Card Demo ──────────────────────────────── */
+
+.tut-flip-card-container {
+  display: flex;
+  justify-content: center;
+  perspective: 800px;
+}
+
+.tut-flip-card {
+  width: 140px;
+  height: 190px;
+  position: relative;
+  transform-style: preserve-3d;
+  transition: transform 0.6s ease;
+  cursor: pointer;
+}
+
+.tut-flip-card.flipped {
+  transform: rotateY(180deg);
+}
+
+.tut-flip-front,
+.tut-flip-back {
+  position: absolute;
+  inset: 0;
+  border-radius: var(--radius-md);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  backface-visibility: hidden;
+  border: 2px solid var(--glass-border);
+}
+
+.tut-flip-front {
+  background: linear-gradient(135deg, rgba(186, 104, 200, 0.15), rgba(26, 29, 46, 0.95));
+  border-color: rgba(186, 104, 200, 0.3);
+}
+
+.tut-flip-front span {
+  font-size: 2rem;
+  margin-bottom: 8px;
+}
+
+.tut-flip-front p {
+  font-family: 'Cinzel', serif;
+  font-size: 0.85rem;
+  margin: 0 0 4px;
+  color: var(--mana-purple);
+}
+
+.tut-flip-front small {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+
+.tut-flip-back {
+  background: linear-gradient(135deg, rgba(50, 50, 70, 0.9), rgba(26, 29, 46, 0.95));
+  border-color: rgba(100, 100, 120, 0.3);
+  transform: rotateY(180deg);
+}
+
+.tut-flip-back span {
+  font-size: 2rem;
+  margin-bottom: 8px;
+}
+
+.tut-flip-back p {
+  font-family: 'Cinzel', serif;
+  font-size: 0.85rem;
+  margin: 0 0 4px;
+  color: var(--text-secondary);
+}
+
+.tut-flip-back small {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+
+/* ─── Combat Simulator ────────────────────────────── */
+
+.tut-combat-sim {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 20px;
+  margin: 16px 0;
+}
+
+.tut-combat-side {
+  text-align: center;
+}
+
+.tut-combat-side h4 {
+  font-family: 'Cinzel', serif;
+  font-size: 0.8rem;
+  margin-bottom: 8px;
+  color: var(--text-secondary);
+}
+
+.tut-combat-side.attacker h4 {
+  color: var(--lp-green);
+}
+
+.tut-combat-side.defender h4 {
+  color: var(--atk-color);
+}
+
+.tut-combat-middle {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.tut-sim-toggle {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 10px;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+
+.tut-sim-toggle label {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.tut-combat-result {
+  margin-top: 12px;
+  padding: 12px 16px;
+  border-radius: var(--radius-md);
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid var(--glass-border);
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  text-align: center;
+  min-height: 40px;
+}
+
+/* ─── Chain Diagram ───────────────────────────────── */
+
+.tut-chain-diagram {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  margin: 16px 0;
+}
+
+.tut-chain-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 20px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--glass-border);
+  width: 100%;
+  max-width: 500px;
+}
+
+.tut-chain-step.trigger {
+  background: rgba(255, 183, 77, 0.06);
+  border-color: rgba(255, 183, 77, 0.2);
+}
+
+.tut-chain-step.response {
+  background: rgba(79, 195, 247, 0.06);
+  border-color: rgba(79, 195, 247, 0.2);
+}
+
+.tut-chain-step.counter {
+  background: rgba(239, 83, 80, 0.06);
+  border-color: rgba(239, 83, 80, 0.2);
+}
+
+.tut-chain-step.resolve {
+  background: rgba(102, 187, 106, 0.06);
+  border-color: rgba(102, 187, 106, 0.2);
+}
+
+.tut-chain-step span {
+  font-size: 1.2rem;
+  flex-shrink: 0;
+}
+
+.tut-chain-step strong {
+  display: block;
+  margin-bottom: 2px;
+  font-size: 0.9rem;
+}
+
+.tut-chain-step p {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+}
+
+.tut-chain-arrow {
+  color: var(--text-muted);
+  font-size: 1rem;
+}
+
+/* ─── Mana Crystal Animation ──────────────────────── */
+
+.tut-mana-sim {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.tut-mana-crystals {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: center;
+  min-height: 32px;
+}
+
+.tut-mana-crystal {
+  font-size: 1.3rem;
+  animation: tut-crystal-pop 0.3s ease;
+}
+
+@keyframes tut-crystal-pop {
+  0% {
+    transform: scale(0);
+    opacity: 0;
+  }
+
+  70% {
+    transform: scale(1.3);
+  }
+
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+.tut-mana-info {
+  display: flex;
+  gap: 20px;
+  font-family: 'Orbitron', monospace;
+  font-size: 0.85rem;
+  color: var(--mana-blue);
+}
+
+/* ─── Token Gallery ───────────────────────────────── */
+
+.tut-token-gallery {
+  margin-top: 20px;
+}
+
+.tut-token-gallery h4 {
+  font-family: 'Cinzel', serif;
+  font-size: 0.95rem;
+  color: var(--gold);
+  margin-bottom: 12px;
+}
+
+.tut-token-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.tut-token-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 16px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--glass-border);
+}
+
+.tut-token-item.north {
+  background: rgba(79, 195, 247, 0.04);
+  border-color: rgba(79, 195, 247, 0.15);
+}
+
+.tut-token-item.east {
+  background: rgba(102, 187, 106, 0.04);
+  border-color: rgba(102, 187, 106, 0.15);
+}
+
+.tut-token-item.south {
+  background: rgba(239, 83, 80, 0.04);
+  border-color: rgba(239, 83, 80, 0.15);
+}
+
+.tut-token-item.west {
+  background: rgba(255, 183, 77, 0.04);
+  border-color: rgba(255, 183, 77, 0.15);
+}
+
+.tut-token-icon {
+  font-size: 1.5rem;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.tut-token-item strong {
+  font-family: 'Cinzel', serif;
+  font-size: 0.85rem;
+  display: block;
+  margin-bottom: 2px;
+}
+
+.tut-token-item p {
+  font-size: 0.78rem;
+  margin: 0;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+
+/* ─── Landmark Examples ───────────────────────────── */
+
+.tut-landmark-examples {
+  margin-top: 20px;
+}
+
+.tut-landmark-examples h4 {
+  font-family: 'Cinzel', serif;
+  font-size: 0.95rem;
+  color: var(--gold);
+  margin-bottom: 4px;
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -7321,4 +8026,165 @@ body {
 .popup-card-thumb:hover {
   transform: scale(1.05);
   box-shadow: 0 0 12px rgba(255, 213, 79, 0.3) !important;
+}
+
+/* ─── Match Stats (Game Over Screen) ───────────────── */
+
+.match-stats {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 213, 79, 0.15);
+  border-radius: 16px;
+  padding: 20px 24px;
+  margin: 20px auto;
+  max-width: 440px;
+  animation: stats-fade-in 0.6s ease-out 0.3s both;
+}
+
+@keyframes stats-fade-in {
+  0% {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.match-stats-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px 24px;
+}
+
+.stat-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+.stat-icon {
+  font-size: 1.3rem;
+  line-height: 1;
+}
+
+.stat-label {
+  font-family: 'Inter', sans-serif;
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  color: var(--text-muted, #525a72);
+}
+
+.stat-value {
+  font-family: 'Cinzel', serif;
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--text-primary, #e0e6f0);
+}
+
+/* ─── Match History List ───────────────────────────── */
+
+.match-history-list {
+  max-height: 55vh;
+  overflow-y: auto;
+  padding: 4px 0;
+  margin: 12px auto;
+  max-width: 500px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 213, 79, 0.25) transparent;
+}
+
+.match-history-item {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 16px;
+  margin-bottom: 8px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  transition: background 0.15s ease;
+}
+
+.match-history-item:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.match-history-item.win {
+  border-left: 3px solid #66bb6a;
+}
+
+.match-history-item.loss {
+  border-left: 3px solid #ef5350;
+}
+
+.match-history-item.draw {
+  border-left: 3px solid #ffd54f;
+}
+
+.mh-result {
+  font-family: 'Cinzel', serif;
+  font-size: 0.7rem;
+  font-weight: 900;
+  letter-spacing: 2px;
+  min-width: 44px;
+  text-align: center;
+  padding: 4px 8px;
+  border-radius: 6px;
+}
+
+.win .mh-result {
+  color: #66bb6a;
+  background: rgba(102, 187, 106, 0.12);
+}
+
+.loss .mh-result {
+  color: #ef5350;
+  background: rgba(239, 83, 80, 0.12);
+}
+
+.draw .mh-result {
+  color: #ffd54f;
+  background: rgba(255, 213, 79, 0.12);
+}
+
+.mh-details {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.mh-regions {
+  font-family: 'Inter', sans-serif;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-primary, #e0e6f0);
+}
+
+.mh-meta {
+  font-family: 'Inter', sans-serif;
+  font-size: 0.65rem;
+  color: var(--text-muted, #525a72);
+}
+
+.mh-winner {
+  font-family: 'Inter', sans-serif;
+  font-size: 0.7rem;
+  color: var(--text-secondary, #8b92a8);
+  white-space: nowrap;
+}
+
+.menu-btn.danger {
+  background: rgba(239, 83, 80, 0.12);
+  border-color: rgba(239, 83, 80, 0.3);
+  color: #ef5350;
+}
+
+.menu-btn.danger:hover {
+  background: rgba(239, 83, 80, 0.2);
 }

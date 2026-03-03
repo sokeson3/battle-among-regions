@@ -180,19 +180,18 @@ export class OnlineWarCampaignUI {
       });
     }
 
-    // Build seats for 2-player draft (same as offline)
-    const nonChosenRegions = allRegions.filter(r => r !== this._myRegion && r !== this._opponentRegion);
-    const shuffledNonChosen = [...nonChosenRegions].sort(() => Math.random() - 0.5);
+    // Use server-assigned seat order to ensure both players get different non-chosen regions
+    const seatOrder = msg.seatOrder;
     // Seats from MY perspective:
     // seat 0 (me): my region
-    // seat 1 (empty): non-chosen A
+    // seat 1 (empty): non-chosen A (mirrored per player by server)
     // seat 2 (opp): opponent's region
     // seat 3 (empty): non-chosen B
     let seats = [
-      { ownerId: 'me', region: this._myRegion },
-      { ownerId: null, region: shuffledNonChosen[0] },
-      { ownerId: 'opp', region: this._opponentRegion },
-      { ownerId: null, region: shuffledNonChosen[1] },
+      { ownerId: 'me', region: seatOrder[0] },
+      { ownerId: null, region: seatOrder[1] },
+      { ownerId: 'opp', region: seatOrder[2] },
+      { ownerId: null, region: seatOrder[3] },
     ];
 
     for (const seat of seats) {
@@ -208,14 +207,12 @@ export class OnlineWarCampaignUI {
     }
 
     // ────────────────────────────────────────────────────────
-    // PHASE 1: Draft from first 2 pools (own region + first rotation)
+    // PHASE 1: Draft from pools locally (5 rotations)
     // These are independent of the opponent's picks
     // ────────────────────────────────────────────────────────
-
-    // Pass 1: draft from my own region (seat 0)
     const phase1Remaining = [];  // track remaining pools to send in sync
 
-    for (let pass = 0; pass < 2; pass++) {
+    for (let pass = 0; pass < 5; pass++) {
       if (playerPicks.length >= targetSize) break;
 
       const mySeat = seats[0]; // always position 0 = my seat
@@ -232,7 +229,7 @@ export class OnlineWarCampaignUI {
             regionPool: filteredPool,
             regionName: mySeat.pool.length > 0 ? mySeat.pool[0].region : 'Unknown',
             passNumber: pass + 1,
-            totalPasses: '4',
+            totalPasses: '10',
             currentDeckSize: playerPicks.length,
             targetDeckSize: targetSize,
             existingDeckCardIds: playerPicks,
@@ -268,10 +265,8 @@ export class OnlineWarCampaignUI {
 
     // ────────────────────────────────────────────────────────
     // SYNC: Send my remaining pools, wait for opponent's
-    // phase1Remaining[0] = remaining from my own region (pass 1)
-    // phase1Remaining[1] = remaining from non-chosen A (pass 2)
     // ────────────────────────────────────────────────────────
-    this.net.warDraftSync(phase1Remaining[0], phase1Remaining[1]);
+    this.net.warDraftSync(phase1Remaining[0], phase1Remaining[1], phase1Remaining.slice(2));
     this._showWaitingScreen('Waiting for opponent to finish drafting first pools...');
 
     // Wait for WAR_DRAFT_CONTINUE from server (opponent's remaining pools)
@@ -280,7 +275,7 @@ export class OnlineWarCampaignUI {
     });
 
     // ────────────────────────────────────────────────────────
-    // PHASE 2: Draft from opponent's remaining pools
+    // PHASE 2: Draft from opponent's remaining pools (5 passes)
     // Rebuild pools from the card IDs received from opponent
     // ────────────────────────────────────────────────────────
     let phase2DraftIdCounter = 10000;
@@ -295,16 +290,17 @@ export class OnlineWarCampaignUI {
       return pool;
     };
 
-    // The opponent's remaining pools arrive in the same order they drafted:
-    // pool1 = opponent's own region remaining, pool2 = non-chosen remaining
-    // After 2 more rotations, these land on my seat
-    const oppPool1 = rebuildPool(continueData.pool1Ids);
-    const oppPool2 = rebuildPool(continueData.pool2Ids);
+    // Collect all synced pools: pool1, pool2, and any extras
+    const syncedPoolIds = [
+      continueData.pool1Ids || [],
+      continueData.pool2Ids || [],
+      ...(continueData.extraPools || []),
+    ];
 
-    // Draft from opponent's first remaining pool (pass 3)
-    for (let i = 0; i < 2; i++) {
+    // Draft from opponent's remaining pools
+    for (let i = 0; i < syncedPoolIds.length; i++) {
       if (playerPicks.length >= targetSize) break;
-      const pool = i === 0 ? oppPool1 : oppPool2;
+      const pool = rebuildPool(syncedPoolIds[i]);
 
       if (pool.length > 0 && playerPicks.length < targetSize) {
         const filteredPool = pool.filter(c =>
@@ -317,8 +313,8 @@ export class OnlineWarCampaignUI {
             playerRegion: this._myRegion,
             regionPool: filteredPool,
             regionName: pool.length > 0 ? pool[0].region : 'Unknown',
-            passNumber: 3 + i,
-            totalPasses: '4',
+            passNumber: 6 + i,
+            totalPasses: '10',
             currentDeckSize: playerPicks.length,
             targetDeckSize: targetSize,
             existingDeckCardIds: playerPicks,

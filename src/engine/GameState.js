@@ -238,6 +238,9 @@ export class GameState {
             gameMode: this.gameMode,
             gameOver: this.gameOver,
             winner: this.winner,
+            isFirstTurn: this.isFirstTurn,
+            eventLog: this.eventLog,
+            startingLP: this.startingLP || 3000,
         };
     }
 }

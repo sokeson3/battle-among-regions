@@ -8,7 +8,7 @@ import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import express from 'express';
 import { WebSocketServer } from 'ws';
-import { readFileSync } from 'fs';
+import { readFileSync, appendFileSync, existsSync } from 'fs';
 
 // Import game engine
 import { GameController } from '../src/engine/GameController.js';
@@ -24,6 +24,19 @@ const PROJECT_ROOT = join(__dirname, '..');
 
 // ─── Configuration ───────────────────────────────────────────
 const PORT = process.env.PORT || 4000;
+const MATCH_LOG_PATH = join(PROJECT_ROOT, 'match_history.csv');
+
+// ─── CSV Match Logger ────────────────────────────────────────
+
+function logMatchToCSV({ date, duration, rounds, turns, winner, winnerName, player1Name, player1Region, player2Name, player2Region }) {
+    const headers = 'Date,Duration(s),Rounds,Turns,Winner,WinnerName,Player1,Player1Region,Player2,Player2Region';
+    if (!existsSync(MATCH_LOG_PATH)) {
+        appendFileSync(MATCH_LOG_PATH, headers + '\n', 'utf-8');
+    }
+    const escape = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const row = [date, duration, rounds, turns, winner, winnerName, player1Name, player1Region, player2Name, player2Region].map(escape).join(',');
+    appendFileSync(MATCH_LOG_PATH, row + '\n', 'utf-8');
+}
 
 // ─── Room Manager ────────────────────────────────────────────
 
@@ -199,12 +212,21 @@ class WarRoomManager {
         warRoom.players[0].region = shuffled[0];
         warRoom.players[1].region = shuffled[1];
 
+        // Determine and store the non-chosen regions in a fixed shuffled order
+        const nonChosen = allRegions.filter(r => r !== shuffled[0] && r !== shuffled[1]);
+        const shuffledNonChosen = [...nonChosen].sort(() => Math.random() - 0.5);
+        warRoom.nonChosenRegions = shuffledNonChosen; // persist for subsequent rounds
+
         // Go straight to deck build (skip region select)
         warRoom.phase = 'DECK_BUILD';
         warRoom.draftSyncData = {}; // { playerId -> { pool1, pool2 } }
         const roundDef = this.getRoundDef(warRoom);
         for (const p of warRoom.players) {
             const opp = warRoom.players.find(o => o.id !== p.id);
+            // Mirror seat order so each player gets a different non-chosen region as seat 1
+            const seatOrder = p.id === 0
+                ? [p.region, shuffledNonChosen[0], opp.region, shuffledNonChosen[1]]
+                : [p.region, shuffledNonChosen[1], opp.region, shuffledNonChosen[0]];
             this.send(p.ws, 'WAR_DRAFT_START', {
                 yourRegion: p.region,
                 opponentRegion: opp.region,
@@ -212,17 +234,18 @@ class WarRoomManager {
                 round: warRoom.currentRound,
                 roundDef,
                 standings: this.getStandings(warRoom),
+                seatOrder,
             });
         }
-        console.log(`⚔ War room ${code}: ${warRoom.players[0].name} (${shuffled[0]}) vs ${warRoom.players[1].name} (${shuffled[1]})`);
+        console.log(`⚔ War room ${code}: ${warRoom.players[0].name} (${shuffled[0]}) vs ${warRoom.players[1].name} (${shuffled[1]}), non-chosen: [${shuffledNonChosen}]`);
         return { warRoom };
     }
 
-    handleDraftSync(warRoom, ws, pool1Ids, pool2Ids) {
+    handleDraftSync(warRoom, ws, pool1Ids, pool2Ids, extraPools = []) {
         const player = warRoom.players.find(p => p.ws === ws);
         if (!player) return;
 
-        warRoom.draftSyncData[player.id] = { pool1Ids, pool2Ids };
+        warRoom.draftSyncData[player.id] = { pool1Ids, pool2Ids, extraPools };
         this.send(ws, 'GAME_PHASE', { phase: 'WAITING', message: 'Waiting for opponent to finish drafting first pools...' });
 
         // When both players have synced, exchange pools
@@ -233,6 +256,7 @@ class WarRoomManager {
                 this.send(p.ws, 'WAR_DRAFT_CONTINUE', {
                     pool1Ids: oppSync.pool1Ids,
                     pool2Ids: oppSync.pool2Ids,
+                    extraPools: oppSync.extraPools,
                 });
             }
             warRoom.draftSyncData = {};
@@ -265,8 +289,12 @@ class WarRoomManager {
             warRoom.phase = 'DECK_BUILD';
             warRoom.draftSyncData = {};
             const roundDef = this.getRoundDef(warRoom);
+            const nc = warRoom.nonChosenRegions || [];
             for (const p of warRoom.players) {
                 const opp = warRoom.players.find(o => o.id !== p.id);
+                const seatOrder = p.id === 0
+                    ? [p.region, nc[0], opp.region, nc[1]]
+                    : [p.region, nc[1], opp.region, nc[0]];
                 this.send(p.ws, 'WAR_DRAFT_START', {
                     yourRegion: p.region,
                     opponentRegion: opp.region,
@@ -275,6 +303,7 @@ class WarRoomManager {
                     roundDef,
                     standings: this.getStandings(warRoom),
                     previousDeck: p.deck,
+                    seatOrder,
                 });
             }
             return true;
@@ -503,6 +532,9 @@ async function startGame(room, roomMgr, csvText) {
         startingLP: 3000,
     });
 
+    // Record match start time
+    room.startedAt = Date.now();
+
     // Now move to landmark phase
     room.phase = 'LANDMARK';
     room.landmarkSelections = {};
@@ -542,7 +574,7 @@ async function startWarRound(warRoom, warRoomMgr, roomMgr, csvText) {
     const playerConfigs = warRoom.players.map(p => ({
         name: p.name,
         region: p.region,
-        customDeck: p.deck,
+        deckCardIds: p.deck,
     }));
 
     // Create a game room in the regular RoomManager for action handling
@@ -555,6 +587,7 @@ async function startWarRound(warRoom, warRoomMgr, roomMgr, csvText) {
         mulliganDone: {},
         warRoom: warRoom, // link back to the war room
     };
+    gameRoom.startedAt = Date.now();
     roomMgr.rooms.set(gameRoom.code, gameRoom);
     warRoom.gameRoom = gameRoom;
 
@@ -834,9 +867,27 @@ async function handleAction(room, ws, msg, roomMgr) {
                         roomMgr.rooms.delete(room.code);
                         room.warRoom.gameRoom = null;
                     } else {
-                        roomMgr.broadcast(room, 'GAME_OVER', {
+                        const duration = room.startedAt ? Math.round((Date.now() - room.startedAt) / 1000) : 0;
+                        const matchData = {
                             winner: gs.winner,
                             winnerName: gs.winner !== null ? gs.getPlayerById(gs.winner)?.name : null,
+                            duration,
+                            rounds: gs.roundCounter,
+                            turns: gs.turnCounter,
+                            players: room.players.map(p => ({ name: p.name, region: p.region })),
+                        };
+                        roomMgr.broadcast(room, 'GAME_OVER', matchData);
+                        logMatchToCSV({
+                            date: new Date().toISOString(),
+                            duration,
+                            rounds: gs.roundCounter,
+                            turns: gs.turnCounter,
+                            winner: gs.winner,
+                            winnerName: matchData.winnerName,
+                            player1Name: room.players[0]?.name,
+                            player1Region: room.players[0]?.region,
+                            player2Name: room.players[1]?.name,
+                            player2Region: room.players[1]?.region,
                         });
                     }
                 } else {
@@ -884,9 +935,27 @@ async function handleAction(room, ws, msg, roomMgr) {
             roomMgr.rooms.delete(room.code);
             room.warRoom.gameRoom = null;
         } else {
-            roomMgr.broadcast(room, 'GAME_OVER', {
+            const duration = room.startedAt ? Math.round((Date.now() - room.startedAt) / 1000) : 0;
+            const matchData = {
                 winner: gs.winner,
                 winnerName: gs.winner !== null ? gs.getPlayerById(gs.winner)?.name : null,
+                duration,
+                rounds: gs.roundCounter,
+                turns: gs.turnCounter,
+                players: room.players.map(p => ({ name: p.name, region: p.region })),
+            };
+            roomMgr.broadcast(room, 'GAME_OVER', matchData);
+            logMatchToCSV({
+                date: new Date().toISOString(),
+                duration,
+                rounds: gs.roundCounter,
+                turns: gs.turnCounter,
+                winner: gs.winner,
+                winnerName: matchData.winnerName,
+                player1Name: room.players[0]?.name,
+                player1Region: room.players[0]?.region,
+                player2Name: room.players[1]?.name,
+                player2Region: room.players[1]?.region,
             });
         }
     }
@@ -911,6 +980,15 @@ app.use(express.static(join(PROJECT_ROOT, 'dist')));
 app.use('/output', express.static(join(PROJECT_ROOT, 'dist', 'output')));
 app.use('/card_dataV4.2.csv', (req, res) => {
     res.sendFile(join(PROJECT_ROOT, 'card_dataV4.2.csv'));
+});
+
+// Serve match history CSV for download
+app.get('/api/match-history.csv', (req, res) => {
+    if (existsSync(MATCH_LOG_PATH)) {
+        res.download(MATCH_LOG_PATH, 'match_history.csv');
+    } else {
+        res.status(404).send('No match history yet.');
+    }
 });
 
 // Fallback to index.html for SPA routing
@@ -1042,7 +1120,7 @@ wss.on('connection', (ws) => {
             case 'WAR_DRAFT_SYNC': {
                 const warRoom = warRoomMgr.getWarRoomByWs(ws);
                 if (warRoom && warRoom.phase === 'DECK_BUILD') {
-                    warRoomMgr.handleDraftSync(warRoom, ws, msg.pool1Ids || [], msg.pool2Ids || []);
+                    warRoomMgr.handleDraftSync(warRoom, ws, msg.pool1Ids || [], msg.pool2Ids || [], msg.extraPools || []);
                 }
                 break;
             }
