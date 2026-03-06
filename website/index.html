@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Battle Among Regions — Strategic Card Game</title>
+  <meta name="description"
+    content="Battle Among Regions is a strategic card game where generals lead their homelands in a war for supremacy. Choose your region, build your deck, and dominate the battlefield." />
+  <meta name="keywords" content="card game, strategy game, battle among regions, online card game, deck building" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link
+    href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600;700;900&family=Inter:wght@300;400;500;600;700&family=Orbitron:wght@400;500;700&display=swap"
+    rel="stylesheet">
+  <link rel="stylesheet" href="styles.css" />
+</head>
+
+<body>
+
+  <!-- ═══ Navigation ═══ -->
+  <nav class="navbar" id="navbar">
+    <a href="#hero" class="nav-logo">
+      <span class="logo-text">B<span class="logo-accent">A</span>R</span>
+    </a>
+    <button class="nav-toggle" id="nav-toggle" aria-label="Toggle navigation">
+      <span></span><span></span><span></span>
+    </button>
+    <ul class="nav-links" id="nav-links">
+      <li><a href="#about">About</a></li>
+      <li><a href="#regions">Regions</a></li>
+      <li><a href="#cards">Cards</a></li>
+      <li><a href="#features">Features</a></li>
+      <li><a href="#howto">How to Play</a></li>
+      <li><a href="#play" class="nav-cta">Play Now</a></li>
+    </ul>
+  </nav>
+
+  <!-- ═══ Hero Section ═══ -->
+  <section class="hero" id="hero">
+    <div class="hero-bg"></div>
+    <div class="hero-overlay"></div>
+    <div class="hero-particles" id="hero-particles"></div>
+    <div class="hero-content">
+      <h1 class="hero-title">
+        <span class="title-line">Battle Among</span>
+        <span class="title-line title-accent">Regions</span>
+      </h1>
+      <p class="hero-subtitle">War for Supremacy</p>
+      <p class="hero-desc">Command your army. Master your region. Dominate the battlefield.</p>
+      <div class="hero-actions">
+        <a href="https://battleamongregions.com/game.html" class="btn btn-primary">Play Now</a>
+        <a href="#about" class="btn btn-ghost">Learn More</a>
+      </div>
+    </div>
+    <div class="hero-scroll-indicator">
+      <span>Scroll</span>
+      <div class="scroll-arrow"></div>
+    </div>
+  </section>
+
+  <!-- ═══ About Section ═══ -->
+  <section class="section about" id="about">
+    <div class="container">
+      <div class="section-header reveal">
+        <span class="section-tag">The Game</span>
+        <h2 class="section-title">A World Divided</h2>
+        <div class="section-divider"></div>
+      </div>
+      <div class="about-grid reveal">
+        <div class="about-text">
+          <p class="about-lead">In a world torn apart by ancient rivalries, four great regions vie for ultimate
+            supremacy.</p>
+          <p>Each region commands unique armies, powerful spells, cunning traps, and legendary landmarks. As a general,
+            you must build your deck, outwit your opponents, and lead your homeland to victory.</p>
+          <p>With over <strong>200 unique cards</strong>, deep strategic gameplay, and online multiplayer — every battle
+            is a test of wits and willpower.</p>
+        </div>
+        <div class="about-stats">
+          <div class="stat-card">
+            <span class="stat-number">200+</span>
+            <span class="stat-label">Unique Cards</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-number">4</span>
+            <span class="stat-label">Regions</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-number">∞</span>
+            <span class="stat-label">Strategies</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-number">1v1</span>
+            <span class="stat-label">Online Duels</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ Regions Showcase ═══ -->
+  <section class="section regions" id="regions">
+    <div class="container">
+      <div class="section-header reveal">
+        <span class="section-tag">Choose Your Path</span>
+        <h2 class="section-title">The Four Regions</h2>
+        <div class="section-divider"></div>
+      </div>
+      <div class="regions-grid">
+
+        <div class="region-showcase north reveal" data-region="north">
+          <div class="region-img-wrap">
+            <img src="./cosmetics/N001.png" alt="The Frostfell Citadel" class="region-img" loading="lazy" />
+            <div class="region-glow north-glow"></div>
+          </div>
+          <div class="region-info">
+            <h3>Northern</h3>
+            <p class="region-style">Defensive &amp; Resilient</p>
+            <p class="region-desc">Ice and frost warriors who endure all. The Northern region excels at building
+              impenetrable defenses, healing, and outlasting opponents with unbreakable fortitude.</p>
+            <div class="region-tags">
+              <span class="tag">High DEF</span>
+              <span class="tag">Healing</span>
+              <span class="tag">Fortify</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="region-showcase east reveal" data-region="east">
+          <div class="region-img-wrap">
+            <img src="./cosmetics/E001.png" alt="Hidden Monastery" class="region-img" loading="lazy" />
+            <div class="region-glow east-glow"></div>
+          </div>
+          <div class="region-info">
+            <h3>Eastern</h3>
+            <p class="region-style">Cunning &amp; Spell-Focused</p>
+            <p class="region-desc">Masters of stealth and ancient scrolls. The Eastern region dominates through spell
+              synergies, shadow mechanics, card advantage, and devastating traps.</p>
+            <div class="region-tags">
+              <span class="tag">Shadow</span>
+              <span class="tag">Spells</span>
+              <span class="tag">Card Draw</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="region-showcase south reveal" data-region="south">
+          <div class="region-img-wrap">
+            <img src="./cosmetics/S001.png" alt="Arena of Trials" class="region-img" loading="lazy" />
+            <div class="region-glow south-glow"></div>
+          </div>
+          <div class="region-info">
+            <h3>Southern</h3>
+            <p class="region-style">Aggressive &amp; Relentless</p>
+            <p class="region-desc">Fire and brute force define the South. Rush your enemies with high-ATK units, burn
+              everything with direct damage spells, and overwhelm before they can react.</p>
+            <div class="region-tags">
+              <span class="tag">Rush</span>
+              <span class="tag">Pierce</span>
+              <span class="tag">Burn</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="region-showcase west reveal" data-region="west">
+          <div class="region-img-wrap">
+            <img src="./cosmetics/W001.png" alt="Echoing Canyon" class="region-img" loading="lazy" />
+            <div class="region-glow west-glow"></div>
+          </div>
+          <div class="region-info">
+            <h3>Western</h3>
+            <p class="region-style">Tactical &amp; Versatile</p>
+            <p class="region-desc">Spirits and the arcane fuel the West. Bounce units, copy effects, trigger powerful
+              combos, and adapt your strategy to any situation on the battlefield.</p>
+            <div class="region-tags">
+              <span class="tag">Bounce</span>
+              <span class="tag">Copy</span>
+              <span class="tag">Combos</span>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ Card Gallery ═══ -->
+  <section class="section cards" id="cards">
+    <div class="container">
+      <div class="section-header reveal">
+        <span class="section-tag">The Arsenal</span>
+        <h2 class="section-title">Featured Cards</h2>
+        <div class="section-divider"></div>
+        <p class="section-subtitle">Units, Spells, Traps, and Landmarks — over 200 cards to master</p>
+      </div>
+      <div class="card-gallery reveal">
+        <div class="card-item" data-name="The Great White Bear" data-region="Northern">
+          <img src="./output-web/N023.webp" alt="The Great White Bear" loading="lazy" />
+        </div>
+        <div class="card-item" data-name="Spirit Dragon" data-region="Eastern">
+          <img src="./output-web/E018.webp" alt="Spirit Dragon" loading="lazy" />
+        </div>
+        <div class="card-item" data-name="Inferno Titan" data-region="Southern">
+          <img src="./output-web/S022.webp" alt="Inferno Titan" loading="lazy" />
+        </div>
+        <div class="card-item" data-name="Colossus of the Plains" data-region="Western">
+          <img src="./output-web/W024.webp" alt="Colossus of the Plains" loading="lazy" />
+        </div>
+        <div class="card-item" data-name="Ancient Phoenix" data-region="Southern">
+          <img src="./output-web/S023.webp" alt="Ancient Phoenix" loading="lazy" />
+        </div>
+        <div class="card-item" data-name="Mist Walker" data-region="Eastern">
+          <img src="./output-web/E020.webp" alt="Mist Walker" loading="lazy" />
+        </div>
+        <div class="card-item" data-name="Ymir's Bulwark" data-region="Northern">
+          <img src="./output-web/N022.webp" alt="Ymir's Bulwark" loading="lazy" />
+        </div>
+        <div class="card-item" data-name="Sky Sovereign Eagle" data-region="Western">
+          <img src="./output-web/W022.webp" alt="Sky Sovereign Eagle" loading="lazy" />
+        </div>
+        <div class="card-item" data-name="Colossus of the North" data-region="Northern">
+          <img src="./output-web/N024.webp" alt="Colossus of the North" loading="lazy" />
+        </div>
+        <div class="card-item" data-name="Shadow Clone Master" data-region="Eastern">
+          <img src="./output-web/E014.webp" alt="Shadow Clone Master" loading="lazy" />
+        </div>
+        <div class="card-item" data-name="Colossus of the Sun" data-region="Southern">
+          <img src="./output-web/S024.webp" alt="Colossus of the Sun" loading="lazy" />
+        </div>
+        <div class="card-item" data-name="Spirit Walker Chief" data-region="Western">
+          <img src="./output-web/W023.webp" alt="Spirit Walker Chief" loading="lazy" />
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ Features Section ═══ -->
+  <section class="section features" id="features">
+    <div class="container">
+      <div class="section-header reveal">
+        <span class="section-tag">What Awaits</span>
+        <h2 class="section-title">Game Features</h2>
+        <div class="section-divider"></div>
+      </div>
+      <div class="features-grid">
+        <div class="feature-card reveal">
+          <div class="feature-icon">⚔️</div>
+          <h3>Online Multiplayer</h3>
+          <p>Challenge players worldwide in real-time 1v1 duels. Climb the ranks and prove your mastery.</p>
+        </div>
+        <div class="feature-card reveal">
+          <div class="feature-icon">🃏</div>
+          <h3>Deck Building</h3>
+          <p>Craft your perfect deck from 200+ cards. Mix units, spells, traps, and landmarks for your ultimate
+            strategy.</p>
+        </div>
+        <div class="feature-card reveal">
+          <div class="feature-icon">🏰</div>
+          <h3>War Campaigns</h3>
+          <p>Embark on epic single-player campaigns. Conquer territories and unlock rewards across the four regions.</p>
+        </div>
+        <div class="feature-card reveal">
+          <div class="feature-icon">🗺️</div>
+          <h3>Four Unique Regions</h3>
+          <p>Each region has distinct play styles, exclusive cards, and powerful landmarks that shape the battlefield.
+          </p>
+        </div>
+        <div class="feature-card reveal">
+          <div class="feature-icon">✨</div>
+          <h3>Collectible Cosmetics</h3>
+          <p>Customize your experience with unique card sleeves, playmats, and more from the in-game shop.</p>
+        </div>
+        <div class="feature-card reveal">
+          <div class="feature-icon">📱</div>
+          <h3>Cross-Platform</h3>
+          <p>Play on web, desktop, or mobile. Your progress syncs across all devices seamlessly.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ How to Play ═══ -->
+  <section class="section howto" id="howto">
+    <div class="container">
+      <div class="section-header reveal">
+        <span class="section-tag">Get Started</span>
+        <h2 class="section-title">How to Play</h2>
+        <div class="section-divider"></div>
+      </div>
+      <div class="howto-steps">
+        <div class="step reveal">
+          <div class="step-number">1</div>
+          <div class="step-content">
+            <h3>Choose Your Region</h3>
+            <p>Pick from Northern, Eastern, Southern, or Western — each with unique cards and strategies. You'll receive
+              a starter deck from your chosen homeland.</p>
+          </div>
+        </div>
+        <div class="step reveal">
+          <div class="step-number">2</div>
+          <div class="step-content">
+            <h3>Build Your Deck</h3>
+            <p>Assemble your army of units, spells, traps, and landmarks. Unlock new cards through gameplay and craft
+              the perfect strategy.</p>
+          </div>
+        </div>
+        <div class="step reveal">
+          <div class="step-number">3</div>
+          <div class="step-content">
+            <h3>Battle for Supremacy</h3>
+            <p>Deploy units across regions on the battlefield, activate spells and traps, and reduce your opponent's
+              Life Points to zero to claim victory.</p>
+          </div>
+        </div>
+        <div class="step reveal">
+          <div class="step-number">4</div>
+          <div class="step-content">
+            <h3>Conquer &amp; Collect</h3>
+            <p>Win duels and campaigns to unlock new cards, earn rewards, and customize your collection with exclusive
+              cosmetics.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ Play / Download CTA ═══ -->
+  <section class="section play-section" id="play">
+    <div class="play-bg"></div>
+    <div class="container">
+      <div class="play-content reveal">
+        <h2 class="play-title">Ready for Battle?</h2>
+        <p class="play-desc">Join thousands of generals in the war for supremacy. Free to play — jump in now.</p>
+        <div class="play-actions">
+          <a href="https://battleamongregions.com/game.html" class="btn btn-primary btn-lg">
+            <span class="btn-icon">🌐</span> Play in Browser
+          </a>
+          <a href="#" class="btn btn-ghost btn-lg">
+            <span class="btn-icon">💻</span> Download for PC
+          </a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ Footer ═══ -->
+  <footer class="footer">
+    <div class="container">
+      <div class="footer-content">
+        <div class="footer-brand">
+          <span class="logo-text footer-logo">B<span class="logo-accent">A</span>R</span>
+          <p>Battle Among Regions — War for Supremacy</p>
+        </div>
+        <div class="footer-links">
+          <a href="#about">About</a>
+          <a href="#regions">Regions</a>
+          <a href="#features">Features</a>
+          <a href="#play">Play Now</a>
+        </div>
+      </div>
+      <div class="footer-bottom">
+        <p>&copy; 2026 Battle Among Regions. All rights reserved.</p>
+        <p class="version">v1.0.0</p>
+      </div>
+    </div>
+  </footer>
+
+  <script src="script.js"></script>
+</body>
+
+</html>

@@ -26,17 +26,45 @@ function removeOriginalAssets() {
     };
 }
 
+// Plugin to copy website files into dist after build
+function copyWebsite() {
+    return {
+        name: 'copy-website',
+        closeBundle() {
+            const distDir = path.resolve(__dirname, 'dist');
+            const websiteDir = path.resolve(__dirname, 'website');
+
+            // Copy website files to dist root
+            const filesToCopy = ['index.html', 'styles.css', 'script.js'];
+            for (const file of filesToCopy) {
+                const src = path.join(websiteDir, file);
+                const dest = path.join(distDir, file);
+                if (fs.existsSync(src)) {
+                    fs.copyFileSync(src, dest);
+                    console.log(`📄 Copied website/${file} → dist/${file}`);
+                }
+            }
+        }
+    };
+}
+
 export default defineConfig({
     base: './',
     root: '.',
     publicDir: 'public',
     build: {
         outDir: 'dist',
+        rollupOptions: {
+            input: {
+                game: path.resolve(__dirname, 'game.html'),
+            },
+        },
     },
-    plugins: [removeOriginalAssets()],
+    plugins: [removeOriginalAssets(), copyWebsite()],
     server: {
         port: 3000,
         open: true,
     },
     assetsInclude: ['**/*.csv'],
 });
+
