@@ -11,6 +11,7 @@ import { WebSocketServer } from 'ws';
 import { readFileSync, appendFileSync, existsSync } from 'fs';
 import Stripe from 'stripe';
 import * as DB from './db.mjs';
+import { sendVerificationEmail, sendPasswordResetEmail } from './email.mjs';
 
 // Import game engine
 import { GameController } from '../src/engine/GameController.js';
@@ -1451,8 +1452,21 @@ function authMiddleware(req, res, next) {
 
 app.post('/api/auth/register', (req, res) => {
     try {
-        const { username, password, displayName, deviceLabel } = req.body;
-        const result = DB.createUser(username, password, displayName, deviceLabel || '');
+        const { username, password, displayName, email, deviceLabel } = req.body;
+        const result = DB.createUser(username, password, displayName, email || '', deviceLabel || '');
+
+        // If email was provided, send verification
+        if (email) {
+            try {
+                const { code } = DB.createEmailVerification(result.id);
+                sendVerificationEmail(email, code, result.display_name).catch(err => {
+                    console.error('Failed to send verification email:', err);
+                });
+            } catch (err) {
+                console.error('Failed to create email verification:', err);
+            }
+        }
+
         res.json(result);
     } catch (err) {
         res.status(400).json({ error: err.message });
@@ -1493,6 +1507,75 @@ app.post('/api/auth/link', (req, res) => {
         const { code, deviceLabel } = req.body;
         const result = DB.redeemLinkCode(code, deviceLabel || '');
         res.json(result);
+    } catch (err) {
+        res.status(400).json({ error: err.message });
+    }
+});
+
+// ─── REST API: Email Verification & Password Reset ───────────
+
+app.post('/api/auth/verify-email', authMiddleware, (req, res) => {
+    try {
+        const { code } = req.body;
+        if (!code) return res.status(400).json({ error: 'Verification code is required.' });
+
+        const success = DB.verifyEmail(req.user.id, code);
+        if (!success) return res.status(400).json({ error: 'Invalid or expired verification code.' });
+
+        res.json({ success: true, message: 'Email verified successfully!' });
+    } catch (err) {
+        res.status(400).json({ error: err.message });
+    }
+});
+
+app.post('/api/auth/resend-verification', authMiddleware, (req, res) => {
+    try {
+        const user = DB.getUserByToken(req.token);
+        if (!user || !user.email) {
+            return res.status(400).json({ error: 'No email address on this account.' });
+        }
+        if (user.email_verified) {
+            return res.status(400).json({ error: 'Email is already verified.' });
+        }
+
+        const { code } = DB.createEmailVerification(user.id);
+        sendVerificationEmail(user.email, code, user.display_name).catch(err => {
+            console.error('Failed to resend verification email:', err);
+        });
+
+        res.json({ success: true, message: 'Verification email sent.' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/api/auth/forgot-password', (req, res) => {
+    try {
+        const { email } = req.body;
+        if (!email) return res.status(400).json({ error: 'Email is required.' });
+
+        const user = DB.getUserByEmail(email);
+        // Always return success even if email not found (prevents email enumeration)
+        if (!user) {
+            return res.json({ success: true, message: 'If an account with that email exists, a reset code has been sent.' });
+        }
+
+        const { code } = DB.createPasswordReset(user.id);
+        sendPasswordResetEmail(user.email, code, user.display_name).catch(err => {
+            console.error('Failed to send password reset email:', err);
+        });
+
+        res.json({ success: true, message: 'If an account with that email exists, a reset code has been sent.' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/api/auth/reset-password', (req, res) => {
+    try {
+        const { email, code, newPassword } = req.body;
+        DB.resetPassword(email, code, newPassword);
+        res.json({ success: true, message: 'Password reset successfully. You can now log in.' });
     } catch (err) {
         res.status(400).json({ error: err.message });
     }
@@ -1600,6 +1683,9 @@ app.post('/api/store/checkout', authMiddleware, async (req, res) => {
             return res.status(409).json({ error: 'You already own this item.' });
         }
 
+        // Redirect back to wherever the player is playing from
+        const clientOrigin = req.headers.origin || req.headers.referer?.replace(/\/+$/, '') || CLIENT_URL;
+
         // Create Stripe Checkout Session
         const session = await stripe.checkout.sessions.create({
             payment_method_types: ['card'],
@@ -1615,8 +1701,8 @@ app.post('/api/store/checkout', authMiddleware, async (req, res) => {
                 quantity: 1,
             }],
             mode: 'payment',
-            success_url: `${CLIENT_URL}?purchase=success&item=${cosmeticId}`,
-            cancel_url: `${CLIENT_URL}?purchase=cancelled`,
+            success_url: `${clientOrigin}?purchase=success&item=${cosmeticId}`,
+            cancel_url: `${clientOrigin}?purchase=cancelled`,
             metadata: {
                 userId: String(req.user.id),
                 cosmeticType,

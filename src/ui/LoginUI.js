@@ -1,5 +1,6 @@
 // ─────────────────────────────────────────────────────────────
-// LoginUI.js — Login, Register, and Device Linking UI screens
+// LoginUI.js — Login, Register, Email Verification, Password
+//              Recovery, and Device Linking UI screens
 // ─────────────────────────────────────────────────────────────
 
 export class LoginUI {
@@ -12,9 +13,11 @@ export class LoginUI {
         this.container = container;
         this.auth = authService;
         this.onComplete = onComplete;
-        this.screen = 'login'; // 'login' | 'register' | 'link'
+        this.screen = 'login'; // 'login' | 'register' | 'link' | 'verify' | 'forgot' | 'reset'
         this.error = '';
+        this.success = '';
         this.loading = false;
+        this._resetEmail = ''; // stored email for forgot-password flow
     }
 
     // ─── Entry Point ─────────────────────────────────────────
@@ -22,6 +25,7 @@ export class LoginUI {
     show() {
         this.screen = 'login';
         this.error = '';
+        this.success = '';
         this.loading = false;
         this._render();
     }
@@ -33,6 +37,9 @@ export class LoginUI {
             case 'login': this._renderLogin(); break;
             case 'register': this._renderRegister(); break;
             case 'link': this._renderLink(); break;
+            case 'verify': this._renderVerifyEmail(); break;
+            case 'forgot': this._renderForgotPassword(); break;
+            case 'reset': this._renderResetPassword(); break;
         }
     }
 
@@ -61,6 +68,9 @@ export class LoginUI {
                         </div>
                         <button class="login-btn login-btn-primary" id="login-submit" ${this.loading ? 'disabled' : ''}>
                             ${this.loading ? '⏳ Logging in...' : '🔑 Log In'}
+                        </button>
+                        <button class="login-btn login-btn-text" id="login-forgot">
+                            Forgot Password?
                         </button>
                     </div>
 
@@ -106,6 +116,11 @@ export class LoginUI {
                             <label class="login-label" for="reg-display">Display Name</label>
                             <input class="login-input" type="text" id="reg-display"
                                    placeholder="How others see you" autocomplete="off" />
+                        </div>
+                        <div class="login-field">
+                            <label class="login-label" for="reg-email">Email</label>
+                            <input class="login-input" type="email" id="reg-email"
+                                   placeholder="For verification & password recovery" autocomplete="email" />
                         </div>
                         <div class="login-field">
                             <label class="login-label" for="reg-password">Password</label>
@@ -173,6 +188,131 @@ export class LoginUI {
         this._attachLinkEvents();
     }
 
+    _renderVerifyEmail() {
+        this.container.innerHTML = `
+            <div class="login-screen">
+                <div class="login-card">
+                    <div class="login-logo">
+                        <div class="login-logo-icon">📧</div>
+                        <h1 class="login-title">Verify Email</h1>
+                        <p class="login-subtitle">Check your inbox for a 6-digit code</p>
+                    </div>
+
+                    ${this.error ? `<div class="login-error">${this._escapeHtml(this.error)}</div>` : ''}
+                    ${this.success ? `<div class="login-success">${this._escapeHtml(this.success)}</div>` : ''}
+
+                    <div class="login-form">
+                        <div class="login-field">
+                            <label class="login-label" for="verify-code">Verification Code</label>
+                            <input class="login-input login-input-code" type="text" id="verify-code"
+                                   placeholder="123456" maxlength="6" autocomplete="off"
+                                   inputmode="numeric" pattern="[0-9]*"
+                                   style="letter-spacing:0.3em;text-align:center;font-size:1.5rem" />
+                        </div>
+                        <button class="login-btn login-btn-primary" id="verify-submit" ${this.loading ? 'disabled' : ''}>
+                            ${this.loading ? '⏳ Verifying...' : '✅ Verify Email'}
+                        </button>
+                        <button class="login-btn login-btn-ghost" id="verify-resend" ${this.loading ? 'disabled' : ''}>
+                            📧 Resend Code
+                        </button>
+                    </div>
+
+                    <div class="login-links">
+                        <button class="login-btn login-btn-ghost" id="verify-skip">
+                            Skip for now →
+                        </button>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        this._attachVerifyEvents();
+    }
+
+    _renderForgotPassword() {
+        this.container.innerHTML = `
+            <div class="login-screen">
+                <div class="login-card">
+                    <div class="login-logo">
+                        <div class="login-logo-icon">🔒</div>
+                        <h1 class="login-title">Forgot Password</h1>
+                        <p class="login-subtitle">Enter the email linked to your account</p>
+                    </div>
+
+                    ${this.error ? `<div class="login-error">${this._escapeHtml(this.error)}</div>` : ''}
+                    ${this.success ? `<div class="login-success">${this._escapeHtml(this.success)}</div>` : ''}
+
+                    <div class="login-form">
+                        <div class="login-field">
+                            <label class="login-label" for="forgot-email">Email Address</label>
+                            <input class="login-input" type="email" id="forgot-email"
+                                   placeholder="Enter your email" autocomplete="email" />
+                        </div>
+                        <button class="login-btn login-btn-primary" id="forgot-submit" ${this.loading ? 'disabled' : ''}>
+                            ${this.loading ? '⏳ Sending...' : '📧 Send Reset Code'}
+                        </button>
+                    </div>
+
+                    <div class="login-links">
+                        <button class="login-btn login-btn-ghost" id="forgot-back">
+                            ← Back to Login
+                        </button>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        this._attachForgotEvents();
+    }
+
+    _renderResetPassword() {
+        this.container.innerHTML = `
+            <div class="login-screen">
+                <div class="login-card">
+                    <div class="login-logo">
+                        <div class="login-logo-icon">🔑</div>
+                        <h1 class="login-title">Reset Password</h1>
+                        <p class="login-subtitle">Enter the code sent to your email</p>
+                    </div>
+
+                    ${this.error ? `<div class="login-error">${this._escapeHtml(this.error)}</div>` : ''}
+                    ${this.success ? `<div class="login-success">${this._escapeHtml(this.success)}</div>` : ''}
+
+                    <div class="login-form">
+                        <div class="login-field">
+                            <label class="login-label" for="reset-code">Reset Code</label>
+                            <input class="login-input login-input-code" type="text" id="reset-code"
+                                   placeholder="123456" maxlength="6" autocomplete="off"
+                                   inputmode="numeric" pattern="[0-9]*"
+                                   style="letter-spacing:0.3em;text-align:center;font-size:1.5rem" />
+                        </div>
+                        <div class="login-field">
+                            <label class="login-label" for="reset-password">New Password</label>
+                            <input class="login-input" type="password" id="reset-password"
+                                   placeholder="At least 4 characters" autocomplete="new-password" />
+                        </div>
+                        <div class="login-field">
+                            <label class="login-label" for="reset-confirm">Confirm New Password</label>
+                            <input class="login-input" type="password" id="reset-confirm"
+                                   placeholder="Re-enter new password" autocomplete="new-password" />
+                        </div>
+                        <button class="login-btn login-btn-primary" id="reset-submit" ${this.loading ? 'disabled' : ''}>
+                            ${this.loading ? '⏳ Resetting...' : '🔑 Reset Password'}
+                        </button>
+                    </div>
+
+                    <div class="login-links">
+                        <button class="login-btn login-btn-ghost" id="reset-back">
+                            ← Back to Login
+                        </button>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        this._attachResetEvents();
+    }
+
     // ─── Event Handlers ──────────────────────────────────────
 
     _attachLoginEvents() {
@@ -224,6 +364,13 @@ export class LoginUI {
             this.onComplete({ loggedIn: false });
         };
 
+        document.getElementById('login-forgot').onclick = () => {
+            this.screen = 'forgot';
+            this.error = '';
+            this.success = '';
+            this._render();
+        };
+
         usernameInput.focus();
     }
 
@@ -236,6 +383,7 @@ export class LoginUI {
         const doRegister = async () => {
             const username = usernameInput.value.trim();
             const displayName = document.getElementById('reg-display').value.trim() || username;
+            const email = document.getElementById('reg-email').value.trim();
             const password = passwordInput.value;
             const confirm = confirmInput.value;
 
@@ -253,8 +401,17 @@ export class LoginUI {
             this.loading = true;
             this._render();
             try {
-                await this.auth.register(username, password, displayName);
-                this.onComplete({ loggedIn: true });
+                const result = await this.auth.register(username, password, displayName, email);
+                // If email was provided, show verification screen
+                if (email) {
+                    this.screen = 'verify';
+                    this.loading = false;
+                    this.error = '';
+                    this.success = '';
+                    this._render();
+                } else {
+                    this.onComplete({ loggedIn: true });
+                }
             } catch (err) {
                 this.loading = false;
                 this.error = err.message;
@@ -304,6 +461,168 @@ export class LoginUI {
         document.getElementById('link-back').onclick = () => {
             this.screen = 'login';
             this.error = '';
+            this._render();
+        };
+
+        codeInput.focus();
+    }
+
+    _attachVerifyEvents() {
+        const submit = document.getElementById('verify-submit');
+        const codeInput = document.getElementById('verify-code');
+
+        const doVerify = async () => {
+            const code = codeInput.value.trim();
+            if (!code || code.length !== 6) {
+                this.error = 'Please enter a valid 6-digit code.';
+                this._render();
+                return;
+            }
+            this.error = '';
+            this.success = '';
+            this.loading = true;
+            this._render();
+            try {
+                await this.auth.verifyEmail(code);
+                this.onComplete({ loggedIn: true });
+            } catch (err) {
+                this.loading = false;
+                this.error = err.message;
+                this._render();
+            }
+        };
+
+        submit.onclick = doVerify;
+        codeInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') doVerify(); });
+
+        document.getElementById('verify-resend').onclick = async () => {
+            this.error = '';
+            this.success = '';
+            this.loading = true;
+            this._render();
+            try {
+                await this.auth.resendVerification();
+                this.loading = false;
+                this.success = 'Verification code resent! Check your inbox.';
+                this._render();
+            } catch (err) {
+                this.loading = false;
+                this.error = err.message;
+                this._render();
+            }
+        };
+
+        document.getElementById('verify-skip').onclick = () => {
+            this.onComplete({ loggedIn: true });
+        };
+
+        codeInput.focus();
+    }
+
+    _attachForgotEvents() {
+        const submit = document.getElementById('forgot-submit');
+        const emailInput = document.getElementById('forgot-email');
+
+        const doForgot = async () => {
+            const email = emailInput.value.trim();
+            if (!email) {
+                this.error = 'Please enter your email address.';
+                this._render();
+                return;
+            }
+            this.error = '';
+            this.success = '';
+            this.loading = true;
+            this._render();
+            try {
+                await this.auth.forgotPassword(email);
+                this._resetEmail = email;
+                this.screen = 'reset';
+                this.loading = false;
+                this.error = '';
+                this.success = 'If an account with that email exists, a reset code has been sent.';
+                this._render();
+            } catch (err) {
+                this.loading = false;
+                this.error = err.message;
+                this._render();
+            }
+        };
+
+        submit.onclick = doForgot;
+        emailInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') doForgot(); });
+
+        document.getElementById('forgot-back').onclick = () => {
+            this.screen = 'login';
+            this.error = '';
+            this.success = '';
+            this._render();
+        };
+
+        emailInput.focus();
+    }
+
+    _attachResetEvents() {
+        const submit = document.getElementById('reset-submit');
+        const codeInput = document.getElementById('reset-code');
+        const passwordInput = document.getElementById('reset-password');
+        const confirmInput = document.getElementById('reset-confirm');
+
+        const doReset = async () => {
+            const code = codeInput.value.trim();
+            const newPassword = passwordInput.value;
+            const confirm = confirmInput.value;
+
+            if (!code || code.length !== 6) {
+                this.error = 'Please enter a valid 6-digit code.';
+                this._render();
+                return;
+            }
+            if (!newPassword || newPassword.length < 4) {
+                this.error = 'Password must be at least 4 characters.';
+                this._render();
+                return;
+            }
+            if (newPassword !== confirm) {
+                this.error = 'Passwords do not match.';
+                this._render();
+                return;
+            }
+
+            this.error = '';
+            this.success = '';
+            this.loading = true;
+            this._render();
+            try {
+                await this.auth.resetPassword(this._resetEmail, code, newPassword);
+                this.screen = 'login';
+                this.loading = false;
+                this.error = '';
+                this.success = '';
+                // Show success on login screen
+                this._render();
+                // Insert a success message after render
+                const card = this.container.querySelector('.login-card .login-logo');
+                if (card) {
+                    const msg = document.createElement('div');
+                    msg.className = 'login-success';
+                    msg.textContent = 'Password reset successfully! You can now log in.';
+                    card.insertAdjacentElement('afterend', msg);
+                }
+            } catch (err) {
+                this.loading = false;
+                this.error = err.message;
+                this._render();
+            }
+        };
+
+        submit.onclick = doReset;
+        confirmInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') doReset(); });
+
+        document.getElementById('reset-back').onclick = () => {
+            this.screen = 'login';
+            this.error = '';
+            this.success = '';
             this._render();
         };
 

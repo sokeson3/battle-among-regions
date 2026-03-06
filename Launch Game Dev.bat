@@ -11,6 +11,9 @@ echo   - Electron Client
 echo.
 cd /d "%~dp0"
 
+echo [0/3] Starting Stripe webhook listener...
+start "Stripe Listener" cmd /c "set /p STRIPE_KEY=<.env & C:\Users\simon\AppData\Local\Microsoft\WinGet\Packages\Stripe.StripeCli_Microsoft.Winget.Source_8wekyb3d8bbwe\stripe.exe listen --forward-to localhost:4000/api/stripe/webhook"
+
 echo [1/3] Starting game server...
 start "BaR Server" cmd /c "node --env-file=.env server/server.mjs"
 

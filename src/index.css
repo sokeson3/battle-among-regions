@@ -10542,6 +10542,19 @@ body {
   }
 }
 
+/* ─── Success ─────────────────────────────────────── */
+
+.login-success {
+  background: rgba(76, 175, 80, 0.1);
+  border: 1px solid rgba(76, 175, 80, 0.3);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  margin-bottom: 20px;
+  color: #66bb6a;
+  font-size: 0.85rem;
+  text-align: center;
+}
+
 /* ─── Form ────────────────────────────────────────── */
 
 .login-form {
@@ -10643,6 +10656,23 @@ body {
 .login-btn-ghost:hover {
   color: var(--text-primary);
   background: rgba(255, 255, 255, 0.03);
+}
+
+.login-btn-text {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  font-family: 'Inter', sans-serif;
+  cursor: pointer;
+  padding: 4px 0;
+  margin-top: -4px;
+  text-align: center;
+  transition: color var(--transition-fast);
+}
+
+.login-btn-text:hover {
+  color: var(--gold);
 }
 
 /* ─── Divider ─────────────────────────────────────── */

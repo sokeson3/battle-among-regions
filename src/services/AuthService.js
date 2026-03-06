@@ -96,15 +96,15 @@ export class AuthService {
 
     /**
      * Register a new account.
-     * @returns {{ id, username, display_name, token }}
+     * @returns {{ id, username, display_name, email, email_verified, token }}
      */
-    async register(username, password, displayName) {
+    async register(username, password, displayName, email = '') {
         const data = await this._fetch('/api/auth/register', {
             method: 'POST',
-            body: JSON.stringify({ username, password, displayName, deviceLabel: this._getDeviceLabel() }),
+            body: JSON.stringify({ username, password, displayName, email, deviceLabel: this._getDeviceLabel() }),
         });
         this._saveToken(data.token);
-        this._saveUser({ id: data.id, username: data.username, display_name: data.display_name, chosen_region: data.chosen_region || null });
+        this._saveUser({ id: data.id, username: data.username, display_name: data.display_name, email: data.email, email_verified: data.email_verified, chosen_region: data.chosen_region || null });
         return data;
     }
 
@@ -147,6 +147,66 @@ export class AuthService {
         } catch { /* ignore */ }
         this._saveToken(null);
         this._saveUser(null);
+    }
+
+    // ─── Email Verification ───────────────────────────────
+
+    /**
+     * Verify email with a 6-digit code.
+     * @param {string} code
+     */
+    async verifyEmail(code) {
+        const data = await this._fetch('/api/auth/verify-email', {
+            method: 'POST',
+            body: JSON.stringify({ code }),
+        });
+        // Update local user state
+        if (this.user) {
+            this.user.email_verified = 1;
+            this._saveUser(this.user);
+        }
+        return data;
+    }
+
+    /**
+     * Resend the verification email.
+     */
+    async resendVerification() {
+        return this._fetch('/api/auth/resend-verification', { method: 'POST' });
+    }
+
+    /**
+     * Request a password reset code.
+     * @param {string} email
+     */
+    async forgotPassword(email) {
+        return this._fetch('/api/auth/forgot-password', {
+            method: 'POST',
+            body: JSON.stringify({ email }),
+        });
+    }
+
+    /**
+     * Reset password using the emailed code.
+     * @param {string} email
+     * @param {string} code
+     * @param {string} newPassword
+     */
+    async resetPassword(email, code, newPassword) {
+        return this._fetch('/api/auth/reset-password', {
+            method: 'POST',
+            body: JSON.stringify({ email, code, newPassword }),
+        });
+    }
+
+    /** Whether the current user's email is verified. */
+    get isEmailVerified() {
+        return !!this.user?.email_verified;
+    }
+
+    /** The current user's email. */
+    get email() {
+        return this.user?.email || null;
     }
 
     // ─── Device Linking ──────────────────────────────────────

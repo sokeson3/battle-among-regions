@@ -62,6 +62,20 @@ db.exec(`
     expires_at TEXT    NOT NULL
   );
 
+  CREATE TABLE IF NOT EXISTS email_verification_codes (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL REFERENCES users(id),
+    code       TEXT    NOT NULL,
+    expires_at TEXT    NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS password_reset_codes (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL REFERENCES users(id),
+    code       TEXT    NOT NULL UNIQUE,
+    expires_at TEXT    NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS user_collections (
     id      INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL REFERENCES users(id),
@@ -101,15 +115,24 @@ try {
     // Column already exists — ignore
 }
 
+// Add email and email_verified columns to users (safe to re-run)
+try {
+    db.exec(`ALTER TABLE users ADD COLUMN email TEXT DEFAULT NULL`);
+} catch (e) { /* already exists */ }
+try {
+    db.exec(`ALTER TABLE users ADD COLUMN email_verified INTEGER DEFAULT 0`);
+} catch (e) { /* already exists */ }
+
 // ─── Prepared Statements ─────────────────────────────────────
 
 const stmts = {
-    insertUser: db.prepare(`INSERT INTO users (username, password_hash, display_name) VALUES (?, ?, ?)`),
+    insertUser: db.prepare(`INSERT INTO users (username, password_hash, display_name, email) VALUES (?, ?, ?, ?)`),
     getUserByName: db.prepare(`SELECT * FROM users WHERE username = ?`),
-    getUserById: db.prepare(`SELECT id, username, display_name, created_at, chosen_region FROM users WHERE id = ?`),
+    getUserById: db.prepare(`SELECT id, username, display_name, created_at, chosen_region, email, email_verified FROM users WHERE id = ?`),
+    getUserByEmail: db.prepare(`SELECT * FROM users WHERE email = ? COLLATE NOCASE`),
 
     insertToken: db.prepare(`INSERT INTO auth_tokens (user_id, token, device_label) VALUES (?, ?, ?)`),
-    getByToken: db.prepare(`SELECT u.id, u.username, u.display_name, u.created_at, u.chosen_region FROM auth_tokens t JOIN users u ON u.id = t.user_id WHERE t.token = ?`),
+    getByToken: db.prepare(`SELECT u.id, u.username, u.display_name, u.created_at, u.chosen_region, u.email, u.email_verified FROM auth_tokens t JOIN users u ON u.id = t.user_id WHERE t.token = ?`),
     deleteToken: db.prepare(`DELETE FROM auth_tokens WHERE token = ?`),
 
     insertDeck: db.prepare(`INSERT INTO user_decks (user_id, name, region, card_ids) VALUES (?, ?, ?, ?)`),
@@ -153,6 +176,20 @@ const stmts = {
     ownsCosmetic: db.prepare(`SELECT 1 FROM user_cosmetics WHERE user_id = ? AND cosmetic_type = ? AND cosmetic_id = ?`),
     insertPurchaseLog: db.prepare(`INSERT INTO purchase_log (user_id, stripe_session_id, cosmetic_type, cosmetic_id, amount, currency) VALUES (?, ?, ?, ?, ?, ?)`),
     getPurchaseBySession: db.prepare(`SELECT * FROM purchase_log WHERE stripe_session_id = ?`),
+
+    // ─── Email Verification ─────────────────────────────
+    insertEmailVerification: db.prepare(`INSERT INTO email_verification_codes (user_id, code, expires_at) VALUES (?, ?, datetime('now', '+30 minutes'))`),
+    getEmailVerification: db.prepare(`SELECT * FROM email_verification_codes WHERE user_id = ? AND code = ? AND expires_at > datetime('now')`),
+    deleteEmailVerifications: db.prepare(`DELETE FROM email_verification_codes WHERE user_id = ?`),
+    markEmailVerified: db.prepare(`UPDATE users SET email_verified = 1 WHERE id = ?`),
+
+    // ─── Password Reset ─────────────────────────────────
+    insertPasswordReset: db.prepare(`INSERT INTO password_reset_codes (user_id, code, expires_at) VALUES (?, ?, datetime('now', '+30 minutes'))`),
+    getPasswordReset: db.prepare(`SELECT * FROM password_reset_codes WHERE code = ? AND expires_at > datetime('now')`),
+    deletePasswordResets: db.prepare(`DELETE FROM password_reset_codes WHERE user_id = ?`),
+    updatePasswordHash: db.prepare(`UPDATE users SET password_hash = ? WHERE id = ?`),
+    cleanExpiredEmailCodes: db.prepare(`DELETE FROM email_verification_codes WHERE expires_at <= datetime('now')`),
+    cleanExpiredResetCodes: db.prepare(`DELETE FROM password_reset_codes WHERE expires_at <= datetime('now')`),
 };
 
 // ─── Token Generation ────────────────────────────────────────
@@ -174,9 +211,10 @@ function generateLinkCodeStr() {
  * Register a new user.
  * @returns {{ id, username, display_name, token }}
  */
-export function createUser(username, password, displayName, deviceLabel = '') {
+export function createUser(username, password, displayName, email = '', deviceLabel = '') {
     username = username.trim();
     displayName = (displayName || username).trim();
+    email = (email || '').trim().toLowerCase();
 
     if (!username || username.length < 3 || username.length > 24) {
         throw new Error('Username must be 3–24 characters.');
@@ -187,12 +225,19 @@ export function createUser(username, password, displayName, deviceLabel = '') {
     if (!password || password.length < 4) {
         throw new Error('Password must be at least 4 characters.');
     }
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        throw new Error('Please enter a valid email address.');
+    }
+    if (email) {
+        const existingEmail = stmts.getUserByEmail.get(email);
+        if (existingEmail) throw new Error('An account with this email already exists.');
+    }
 
     const existing = stmts.getUserByName.get(username);
     if (existing) throw new Error('Username already taken.');
 
     const hash = bcrypt.hashSync(password, 10);
-    const result = stmts.insertUser.run(username, hash, displayName);
+    const result = stmts.insertUser.run(username, hash, displayName, email || null);
     const userId = result.lastInsertRowid;
 
     // Create leaderboard entry
@@ -202,7 +247,7 @@ export function createUser(username, password, displayName, deviceLabel = '') {
     const token = generateToken();
     stmts.insertToken.run(userId, token, deviceLabel);
 
-    return { id: userId, username, display_name: displayName, token };
+    return { id: userId, username, display_name: displayName, email: email || null, email_verified: 0, token };
 }
 
 /**
@@ -459,6 +504,98 @@ export function redeemLinkCode(code, deviceLabel = '') {
     stmts.insertToken.run(user.id, token, deviceLabel);
 
     return { id: user.id, username: user.username, display_name: user.display_name, token };
+}
+
+// ─── Email Verification ──────────────────────────────────────
+
+/**
+ * Generate a 6-digit email verification code for the user.
+ * @returns {{ code: string }}
+ */
+export function createEmailVerification(userId) {
+    // Clean up old codes for this user
+    stmts.deleteEmailVerifications.run(userId);
+    stmts.cleanExpiredEmailCodes.run();
+
+    const code = generateSixDigitCode();
+    stmts.insertEmailVerification.run(userId, code);
+    return { code };
+}
+
+/**
+ * Verify an email verification code.
+ * @returns {boolean}
+ */
+export function verifyEmail(userId, code) {
+    const row = stmts.getEmailVerification.get(userId, code);
+    if (!row) return false;
+
+    // Mark as verified and clean up codes
+    stmts.markEmailVerified.run(userId);
+    stmts.deleteEmailVerifications.run(userId);
+    return true;
+}
+
+/**
+ * Check if a user's email is verified.
+ */
+export function isEmailVerified(userId) {
+    const user = stmts.getUserById.get(userId);
+    return user ? !!user.email_verified : false;
+}
+
+// ─── Password Reset ──────────────────────────────────────────
+
+/**
+ * Look up a user by their email address.
+ * @returns {Object|null}
+ */
+export function getUserByEmail(email) {
+    if (!email) return null;
+    return stmts.getUserByEmail.get(email.trim().toLowerCase()) || null;
+}
+
+/**
+ * Generate a 6-digit password reset code for the user.
+ * @returns {{ code: string }}
+ */
+export function createPasswordReset(userId) {
+    // Clean up old codes for this user
+    stmts.deletePasswordResets.run(userId);
+    stmts.cleanExpiredResetCodes.run();
+
+    const code = generateSixDigitCode();
+    stmts.insertPasswordReset.run(userId, code);
+    return { code };
+}
+
+/**
+ * Reset a user's password using a reset code.
+ * @returns {boolean}
+ */
+export function resetPassword(email, code, newPassword) {
+    if (!email || !code || !newPassword) throw new Error('All fields are required.');
+    if (newPassword.length < 4) throw new Error('Password must be at least 4 characters.');
+
+    const row = stmts.getPasswordReset.get(code);
+    if (!row) throw new Error('Invalid or expired reset code.');
+
+    const user = stmts.getUserById.get(row.user_id);
+    if (!user) throw new Error('Account not found.');
+    if (user.email?.toLowerCase() !== email.trim().toLowerCase()) {
+        throw new Error('Invalid or expired reset code.');
+    }
+
+    const hash = bcrypt.hashSync(newPassword, 10);
+    stmts.updatePasswordHash.run(hash, user.id);
+    stmts.deletePasswordResets.run(user.id);
+    return true;
+}
+
+// ─── Code Generators ─────────────────────────────────────────
+
+function generateSixDigitCode() {
+    return String(Math.floor(100000 + Math.random() * 900000));
 }
 
 export default db;
