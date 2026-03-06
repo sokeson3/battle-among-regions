@@ -151,7 +151,7 @@ W046,Decoy Totem,Trap,Western,0,0,3,"When a friendly unit is targeted by an enem
 W047,Surprise Reinforcements,Trap,Western,0,0,3,When a friendly unit is destroyed by battle: Summon one unit with a cost of 4 or less from your hand.,1,,,,,,,,,,,,,,,,
 W048,Ensnaring Trap,Trap,Western,0,0,1,When an enemy unit declares an attack: The attacking unit cannot attack during your opponent's next turn.,1,,,,,,,,,,,,,,,,
 W049,Spirit Backlash,Trap,Western,0,0,3,When a friendly unit is targeted by an enemy Spell or Trap: Destroy that Spell/Trap card and negate its effect.,1,,,,,,,,,,,,,,,,
-W050,Power Siphon,Trap,Western,0,0,4,When your opponent activates a unit's ability: A friendly unit of your choice gains ATK and DEF equal to the cost of that unit x100.,1,,,,,,,,,,,,,,,,
+W050,Power Siphon,Trap,Western,0,0,4,When an opponent's unit activates or triggers an effect: A friendly unit of your choice gains ATK and DEF equal to the cost of that unit x100.,1,,,,,,,,,,,,,,,,
 S001,Arena of Trials,Landmark,Southern,0,0,5,"LANDMARK: When a southern unit in ATK position fights a non-southern unit in this region, the non-southern unit is destroyed after damage calculation.",2,,,,,,,,,,,,,,,,
 S002,Volcanic Forge,Landmark,Southern,0,0,1,LANDMARK: Southern units gain +200 ATK when fighting in this region.,2,,,,,,,,,,,,,,,,
 S003,Sunspear Recruit,Unit,Southern,200,100,0,Rush.,1,,,,,,,,,,,,,,,,

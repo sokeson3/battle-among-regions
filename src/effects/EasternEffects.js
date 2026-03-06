@@ -123,7 +123,16 @@ export function register(effectEngine, cardDB) {
         }),
     ]);
 
-    // E006: Meditation Adept — Spells can be activated as Traps (passive)
+    // E006: Meditation Adept — Spells can be activated as Traps
+    // Actual logic is in GameController._resolveChain() which checks for E006 on field
+    effectEngine.registerCardEffects('E006', [
+        createEffect({
+            cardId: 'E006',
+            trigger: 'PASSIVE',
+            description: 'Your Spells can be chained as if they were Traps (handled in GameController)',
+            execute: () => { },
+        }),
+    ]);
 
     // E007: Silent Assassin — Shadow. Rush. Cannot be targeted by enemy Spells/Traps while attacking
     effectEngine.registerCardEffects('E007', [
@@ -171,6 +180,8 @@ export function register(effectEngine, cardDB) {
                 const players = gs.players.filter(p => p.landmarkZone !== null);
                 if (players.length >= 2) {
                     // Swap the first two landmarks found
+                    ee._cleanupLandmarkBuffs(players[0], players[0].landmarkZone);
+                    ee._cleanupLandmarkBuffs(players[1], players[1].landmarkZone);
                     const temp = players[0].landmarkZone;
                     players[0].landmarkZone = players[1].landmarkZone;
                     players[1].landmarkZone = temp;
@@ -190,7 +201,7 @@ export function register(effectEngine, cardDB) {
             trigger: EFFECT_EVENTS.ON_SPELL_PLAY,
             description: '+100/+100 on first Spell/Trap',
             condition: (gs, ctx) => {
-                return ctx.caster?.id === ctx.source?.ownerId && ctx.caster.spellsPlayedThisTurn <= 1;
+                return ctx.caster?.id === ctx.source?.ownerId && ctx.caster.spellsPlayedThisTurn === 1;
             },
             execute: (gs, ctx, ee) => {
                 ee.applyPermStatMod(ctx.source, 100, 100, 'Wind Dancer');
@@ -217,15 +228,35 @@ export function register(effectEngine, cardDB) {
         }),
     ]);
 
-    // E012: Temple Guardian — Landmark and Set cards cannot be affected by enemies (passive)
+    // E012: Temple Guardian — Landmark and Set cards cannot be affected by enemies
+    // Passive immunity: checked via EffectEngine.isProtectedByTempleGuardian()
+    // Also intercepts enemy landmark destruction/switching effects
+    effectEngine.registerCardEffects('E012', [
+        createEffect({
+            cardId: 'E012',
+            trigger: 'PASSIVE',
+            description: 'Your Landmark and Set cards cannot be affected by enemy cards (checked in EffectEngine)',
+            execute: () => { },
+        }),
+    ]);
 
-    // E013: Arcane Assistant — Once per round: Draw 1 card when Spell/Trap/Landmark affected
+    // E013: Arcane Assistant — Once per round: Draw 1 card when Spell/Trap activated or Landmark affected
     effectEngine.registerCardEffects('E013', [
         createEffect({
             cardId: 'E013',
             trigger: EFFECT_EVENTS.ON_SPELL_PLAY,
             description: 'Draw 1 card when you play a Spell/Trap',
             condition: (gs, ctx) => ctx.caster?.id === ctx.source?.ownerId && !ctx.source.activatedThisRound,
+            execute: (gs, ctx, ee) => {
+                ctx.source.activatedThisRound = true;
+                ee.drawCards(ctx.sourcePlayer.id, 1);
+            },
+        }),
+        createEffect({
+            cardId: 'E013',
+            trigger: EFFECT_EVENTS.ON_LANDMARK_PLACED,
+            description: 'Draw 1 card when a Landmark is affected',
+            condition: (gs, ctx) => !ctx.source.activatedThisRound,
             execute: (gs, ctx, ee) => {
                 ctx.source.activatedThisRound = true;
                 ee.drawCards(ctx.sourcePlayer.id, 1);
@@ -340,7 +371,10 @@ export function register(effectEngine, cardDB) {
                                 );
                                 if (targetPlayer) {
                                     const tp = gs.getPlayerById(targetPlayer.value);
-                                    if (tp.landmarkZone) tp.graveyard.push(tp.landmarkZone);
+                                    if (tp.landmarkZone) {
+                                        ee._cleanupLandmarkBuffs(tp, tp.landmarkZone);
+                                        tp.graveyard.push(tp.landmarkZone);
+                                    }
                                     tp.landmarkZone = landmark;
                                     landmark.faceUp = true;
                                     gs.log('LANDMARK', `${landmark.name} placed in ${tp.name}'s Landmark Zone!`);
@@ -473,10 +507,10 @@ export function register(effectEngine, cardDB) {
             requiresTarget: true,
             targetType: 'any_unit',
             targets: (gs) => gs.getAllFieldUnits(),
-            execute: (gs, ctx, ee) => {
+            execute: async (gs, ctx, ee) => {
                 const dmg = ctx.sourcePlayer.spellsPlayedThisTurn > 1 ? 400 : 200;
                 if (ctx.target) {
-                    ee.dealDamageToUnit(ctx.target, dmg, 'Redirect');
+                    await ee.dealDamageToUnit(ctx.target, dmg, 'Redirect');
                 }
             },
         }),
@@ -534,12 +568,17 @@ export function register(effectEngine, cardDB) {
             trigger: 'SELF',
             description: 'Destroy one Landmark',
             requiresTarget: true,
-            targets: (gs) => gs.players.filter(p => p.landmarkZone).map(p => ({
+            targets: (gs, ctx) => gs.players.filter(p => p.landmarkZone).filter(p => {
+                // E012: Temple Guardian — protected landmarks cannot be targeted by enemies
+                if (p.id !== ctx.sourcePlayer.id && effectEngine.isProtectedByTempleGuardian(p.landmarkZone, ctx.sourcePlayer.id)) return false;
+                return true;
+            }).map(p => ({
                 type: 'landmark', card: p.landmarkZone, player: p, name: `${p.landmarkZone.name} (${p.name})`
             })),
             execute: (gs, ctx, ee) => {
                 if (ctx.target?.type === 'landmark') {
                     const player = ctx.target.player;
+                    ee._cleanupLandmarkBuffs(player, player.landmarkZone);
                     player.graveyard.push(player.landmarkZone);
                     player.landmarkZone = null;
                     gs.log('EFFECT', `${ctx.target.card.name} destroyed by Cleansing Ritual!`);
@@ -584,9 +623,28 @@ export function register(effectEngine, cardDB) {
             cardId: 'E032',
             trigger: 'SELF',
             description: 'Shuffle 3 Spells/Traps from graveyard into deck, draw 1',
-            execute: (gs, ctx, ee) => {
+            execute: async (gs, ctx, ee) => {
                 const eligible = ctx.sourcePlayer.graveyard.filter(c => c.type === 'Spell' || c.type === 'Trap');
-                const toReturn = eligible.slice(0, 3);
+                if (eligible.length === 0) {
+                    gs.log('EFFECT', 'No Spells/Traps in graveyard.');
+                    ee.drawCards(ctx.sourcePlayer.id, 1);
+                    return;
+                }
+                const toReturn = [];
+                let remaining = [...eligible];
+                for (let i = 0; i < Math.min(3, eligible.length); i++) {
+                    if (remaining.length === 0) break;
+                    const chosen = await ee.requestChoice(
+                        remaining.map(c => ({ label: `${c.name} (${c.type})`, value: c.instanceId, cardId: c.cardId })),
+                        `Choose Spell/Trap ${i + 1} of ${Math.min(3, eligible.length)} to shuffle into deck`
+                    );
+                    if (!chosen) break;
+                    const card = remaining.find(c => c.instanceId === chosen.value);
+                    if (card) {
+                        toReturn.push(card);
+                        remaining = remaining.filter(c => c.instanceId !== chosen.value);
+                    }
+                }
                 for (const card of toReturn) {
                     const idx = ctx.sourcePlayer.graveyard.indexOf(card);
                     if (idx >= 0) {
@@ -630,6 +688,7 @@ export function register(effectEngine, cardDB) {
                     if (p.landmarkZone) {
                         playersWithLandmarks.push(p);
                         originalLandmarks.push(p.landmarkZone);
+                        ee._cleanupLandmarkBuffs(p, p.landmarkZone);
                         p.landmarkZone = null;
                     }
                 }
@@ -682,21 +741,40 @@ export function register(effectEngine, cardDB) {
 
     // ─── TRAPS ────────────────────────────────────────────────
 
-    // E025: Calculated Strike — Change target of enemy single-target Spell/Trap
+    // E025: Calculated Strike — Negate enemy single-target Spell/Trap and redirect to another target
     effectEngine.registerCardEffects('E025', [
         createEffect({
             cardId: 'E025',
             trigger: EFFECT_EVENTS.ON_SPELL_ACTIVATE,
-            description: 'Redirect an enemy Spell/Trap to another target',
+            description: 'Negate and redirect enemy Spell/Trap to another target',
             condition: (gs, ctx) => ctx.caster && ctx.caster.id !== ctx.sourcePlayer.id,
             isOptional: true,
-            execute: (gs, ctx, ee) => {
-                gs.log('TRAP', 'Calculated Strike redirects the effect!');
+            execute: async (gs, ctx, ee) => {
+                // Negate the original spell
+                gs._chainNegate = true;
+                gs.log('TRAP', 'Calculated Strike negates the enemy Spell/Trap!');
+
+                // Re-resolve the spell effect with the original caster, but let trap owner choose new target
+                if (ctx.spell) {
+                    const spellEffects = ee.getEffects(ctx.spell.cardId);
+                    if (spellEffects.length > 0) {
+                        gs.log('TRAP', `Calculated Strike redirects ${ctx.spell.name} to a new target!`);
+                        // Override target selection to be done by trap owner, but execute as original caster
+                        const savedSourcePlayerId = ee._currentSourcePlayerId;
+                        ee._currentSourcePlayerId = ctx.sourcePlayer.id;
+                        for (const eff of spellEffects) {
+                            if (eff.trigger === 'SELF' || eff.trigger === EFFECT_EVENTS.ON_SPELL_ACTIVATE) {
+                                await ee._resolveEffect(eff, { source: ctx.spell, sourcePlayer: ctx.caster });
+                            }
+                        }
+                        ee._currentSourcePlayerId = savedSourcePlayerId;
+                    }
+                }
             },
         }),
     ]);
 
-    // E037: Feint — Attack now targets your LP instead
+    // E037: Feint — Attack now targets your LP instead (no unit combat)
     effectEngine.registerCardEffects('E037', [
         createEffect({
             cardId: 'E037',
@@ -704,8 +782,10 @@ export function register(effectEngine, cardDB) {
             description: 'Redirect attack to your LP',
             condition: (gs, ctx) => ctx.target?.type === 'unit' && ctx.target.card?.ownerId === ctx.sourcePlayer.id,
             execute: (gs, ctx, ee) => {
-                // Change target to LP
-                ctx.target = { type: 'direct', player: ctx.sourcePlayer };
+                // Mutate the target object in-place so resolveAttack sees the change
+                ctx.target.type = 'direct';
+                ctx.target.player = ctx.sourcePlayer;
+                delete ctx.target.card;
                 gs.log('TRAP', 'Feint redirects the attack to LP!');
             },
         }),
@@ -724,15 +804,34 @@ export function register(effectEngine, cardDB) {
         }),
     ]);
 
-    // E039: Misdirection — Change target of single-target card
+    // E039: Misdirection — Negate enemy Spell/Trap and redirect to another target
     effectEngine.registerCardEffects('E039', [
         createEffect({
             cardId: 'E039',
-            trigger: EFFECT_EVENTS.ON_FRIENDLY_TARGETED,
-            description: 'Change target to another valid card',
-            condition: (gs, ctx) => ctx.sourcePlayer.id !== ctx.attackerOwner?.id,
-            execute: (gs, ctx, ee) => {
-                gs.log('TRAP', 'Misdirection changes the target!');
+            trigger: EFFECT_EVENTS.ON_SPELL_ACTIVATE,
+            description: 'Negate and redirect enemy Spell/Trap to another target',
+            condition: (gs, ctx) => ctx.caster && ctx.caster.id !== ctx.sourcePlayer.id,
+            execute: async (gs, ctx, ee) => {
+                // Negate the original spell
+                gs._chainNegate = true;
+                gs.log('TRAP', 'Misdirection negates the enemy Spell/Trap!');
+
+                // Re-resolve with new target chosen by trap owner, but as original caster
+                if (ctx.spell) {
+                    const spellEffects = ee.getEffects(ctx.spell.cardId);
+                    if (spellEffects.length > 0) {
+                        gs.log('TRAP', `Misdirection redirects ${ctx.spell.name} to a new target!`);
+                        // Override target selection to be done by trap owner, but execute as original caster
+                        const savedSourcePlayerId = ee._currentSourcePlayerId;
+                        ee._currentSourcePlayerId = ctx.sourcePlayer.id;
+                        for (const eff of spellEffects) {
+                            if (eff.trigger === 'SELF' || eff.trigger === EFFECT_EVENTS.ON_SPELL_ACTIVATE) {
+                                await ee._resolveEffect(eff, { source: ctx.spell, sourcePlayer: ctx.caster });
+                            }
+                        }
+                        ee._currentSourcePlayerId = savedSourcePlayerId;
+                    }
+                }
             },
         }),
     ]);
@@ -743,17 +842,18 @@ export function register(effectEngine, cardDB) {
             cardId: 'E040',
             trigger: EFFECT_EVENTS.ON_BATTLE_PHASE_START,
             description: 'Enemies cannot attack LP directly this turn',
-            condition: (gs, ctx) => gs.getActivePlayer()?.id !== ctx.sourcePlayer.id,
+            condition: (gs, ctx) => ctx.activePlayer?.id !== ctx.sourcePlayer.id,
             execute: (gs, ctx, ee) => {
-                gs.log('TRAP', 'Smoke Screen — no direct LP attacks this turn!');
-                // Set flag to prevent direct attacks
+                // Set flag to prevent direct attacks in CombatEngine.canTarget()
                 ctx.sourcePlayer._smokeScreenActive = true;
+                gs.log('TRAP', 'Smoke Screen — no direct LP attacks this turn!');
             },
         }),
     ]);
 
-    // E041: Vanishing Act — Return targeted friendly unit to hand
+    // E041: Vanishing Act — Return targeted friendly unit to hand (from attack or enemy effect)
     effectEngine.registerCardEffects('E041', [
+        // Triggered when a friendly unit is targeted by a spell/trap
         createEffect({
             cardId: 'E041',
             trigger: EFFECT_EVENTS.ON_FRIENDLY_TARGETED,
@@ -762,12 +862,35 @@ export function register(effectEngine, cardDB) {
             execute: (gs, ctx, ee) => {
                 if (ctx.target?.card) {
                     ee.returnToHand(ctx.target.card);
+                    gs.log('TRAP', `Vanishing Act returns ${ctx.target.card.name} to hand!`);
+                }
+            },
+        }),
+        // Also triggered when a friendly unit is targeted by an attack
+        createEffect({
+            cardId: 'E041',
+            trigger: EFFECT_EVENTS.ON_ATTACK_DECLARE,
+            description: 'Return attacked friendly unit to hand',
+            condition: (gs, ctx) => {
+                return ctx.target?.type === 'unit' && ctx.target.card?.ownerId === ctx.sourcePlayer.id;
+            },
+            execute: (gs, ctx, ee) => {
+                if (ctx.target?.card) {
+                    ee.returnToHand(ctx.target.card);
+                    // Negate the attack since the target is gone
+                    if (gs.battleState) gs.battleState.attackNegated = true;
+                    gs.log('TRAP', `Vanishing Act returns ${ctx.target.card.name} to hand, negating the attack!`);
                 }
             },
         }),
     ]);
 
-    // E042: Spell Reversal — Negate damage spell and reflect to opponent
+    // E042: Spell Reversal — Negate damage spell and reflect damage to opponent
+    // Known damage values for spells that deal damage, keyed by cardId
+    const SPELL_DAMAGE_MAP = {
+        'S032': 100, 'S034': 300, 'S036': 400, 'S040': 200, 'S043': 600,
+        'N036': 400, 'E024': 400, 'E031': 0, // E031 destroys, doesn't deal flat damage
+    };
     effectEngine.registerCardEffects('E042', [
         createEffect({
             cardId: 'E042',
@@ -777,9 +900,18 @@ export function register(effectEngine, cardDB) {
             execute: (gs, ctx, ee) => {
                 gs._chainNegate = true;
                 const opponent = ctx.caster;
-                if (opponent) {
-                    ee.dealDamageToLP(opponent.id, 400, 'Spell Reversal');
-                    gs.log('TRAP', 'Spell Reversal negates and reflects damage!');
+                if (opponent && ctx.spell) {
+                    // Look up known damage value, falling back to manaCost * 100
+                    let reflectDmg = SPELL_DAMAGE_MAP[ctx.spell.cardId];
+                    if (reflectDmg === undefined) {
+                        reflectDmg = (ctx.spell.manaCost || 3) * 100;
+                    }
+                    if (reflectDmg > 0) {
+                        ee.dealDamageToLP(opponent.id, reflectDmg, 'Spell Reversal');
+                        gs.log('TRAP', `Spell Reversal negates and reflects ${reflectDmg} damage!`);
+                    } else {
+                        gs.log('TRAP', `Spell Reversal negates ${ctx.spell.name}!`);
+                    }
                 }
             },
         }),
@@ -811,36 +943,65 @@ export function register(effectEngine, cardDB) {
     ]);
 
     // E044: Time Delay Rune — Opponent can only play 1 more card this turn
+    // Can be activated at any point during the opponent's turn (like a spell response)
     effectEngine.registerCardEffects('E044', [
         createEffect({
             cardId: 'E044',
-            trigger: 'SELF',
+            trigger: EFFECT_EVENTS.ON_SPELL_ACTIVATE,
             description: 'Opponent can only play 1 more card this turn',
+            condition: (gs, ctx) => gs.activePlayerIndex !== ctx.sourcePlayer.id,
             execute: (gs, ctx, ee) => {
-                const opponent = gs.getOpponent(ctx.sourcePlayer.id);
+                const opponent = gs.getActivePlayer();
                 if (opponent) {
-                    opponent._timeDelayActive = true;
+                    opponent._timeDelayCardsRemaining = 1;
+                    gs.log('TRAP', 'Time Delay Rune — opponent can only play 1 more card!');
+                }
+            },
+        }),
+        // Also trigger on summon — can respond to any opponent action
+        createEffect({
+            cardId: 'E044',
+            trigger: EFFECT_EVENTS.ON_OPPONENT_SUMMON,
+            description: 'Opponent can only play 1 more card this turn',
+            condition: (gs, ctx) => ctx.summoningPlayer?.id !== ctx.sourcePlayer.id,
+            execute: (gs, ctx, ee) => {
+                const opponent = gs.getActivePlayer();
+                if (opponent) {
+                    opponent._timeDelayCardsRemaining = 1;
+                    gs.log('TRAP', 'Time Delay Rune — opponent can only play 1 more card!');
+                }
+            },
+        }),
+        // Also trigger on attack
+        createEffect({
+            cardId: 'E044',
+            trigger: EFFECT_EVENTS.ON_ATTACK_DECLARE,
+            description: 'Opponent can only play 1 more card this turn',
+            condition: (gs, ctx) => ctx.attackerOwner?.id !== ctx.sourcePlayer.id,
+            execute: (gs, ctx, ee) => {
+                const opponent = gs.getActivePlayer();
+                if (opponent) {
+                    opponent._timeDelayCardsRemaining = 1;
                     gs.log('TRAP', 'Time Delay Rune — opponent can only play 1 more card!');
                 }
             },
         }),
     ]);
 
-    // E045: Karma Cut — When enemy unit activates effect: destroy it
-    // Implementation: triggers on opponent summon for units with ON_SUMMON effects
+    // E045: Karma Cut — When enemy unit activates its ability: negate and destroy it
     effectEngine.registerCardEffects('E045', [
         createEffect({
             cardId: 'E045',
-            trigger: EFFECT_EVENTS.ON_OPPONENT_SUMMON,
-            description: 'Destroy unit that activated its effect',
+            trigger: EFFECT_EVENTS.ON_ABILITY_ACTIVATE,
+            description: 'Negate ability and destroy unit that activated it',
             condition: (gs, ctx) => {
-                return ctx.summoningPlayer?.id !== ctx.sourcePlayer.id &&
-                    ctx.summonedCard?.effectTriggers?.includes('ON_SUMMON');
+                return ctx.caster?.id !== ctx.sourcePlayer.id && ctx.abilityCard?.type === 'Unit';
             },
             execute: (gs, ctx, ee) => {
-                if (ctx.summonedCard && ctx.summonedCard.effectTriggers.includes('ON_SUMMON')) {
-                    ee.destroyUnit(ctx.summonedCard);
-                    gs.log('TRAP', `Karma Cut destroys ${ctx.summonedCard.name}!`);
+                if (ctx.abilityCard) {
+                    gs._abilityNegate = true;
+                    ee.destroyUnit(ctx.abilityCard);
+                    gs.log('TRAP', `Karma Cut negates and destroys ${ctx.abilityCard.name}!`);
                 }
             },
         }),
@@ -865,10 +1026,11 @@ export function register(effectEngine, cardDB) {
     ]);
 
     // E047: Chain Reaction — Copy graveyard trap effect
+    // Uses the current game context (e.g. attacker, caster) from the triggering event
     effectEngine.registerCardEffects('E047', [
         createEffect({
             cardId: 'E047',
-            trigger: EFFECT_EVENTS.ON_ATTACK_DECLARE,
+            trigger: 'SELF',
             description: 'Copy a Trap from graveyard',
             execute: async (gs, ctx, ee) => {
                 const graveyardTraps = ctx.sourcePlayer.graveyard.filter(c => c.type === 'Trap');
@@ -884,29 +1046,63 @@ export function register(effectEngine, cardDB) {
                     const trapCard = graveyardTraps.find(c => c.instanceId === chosen.value);
                     const trapEffects = ee.getEffects(trapCard.cardId);
                     gs.log('TRAP', `Chain Reaction copies ${trapCard.name}!`);
+                    // Build context that merges current game state context with trap info.
+                    // If we're in a response chain, the triggerContext has the attacker/caster/etc.
+                    const chainContext = {
+                        ...ctx,
+                        source: trapCard,
+                        sourcePlayer: ctx.sourcePlayer,
+                        // Preserve combat/spell context if available
+                        attacker: gs.battleState?.attacker || ctx.attacker,
+                        attackerOwner: gs.battleState?.attackerOwner || ctx.attackerOwner,
+                        target: gs.battleState?.target || ctx.target,
+                        caster: ctx.caster,
+                        spell: ctx.spell,
+                    };
                     for (const eff of trapEffects) {
-                        await ee._resolveEffect(eff, { ...ctx, source: trapCard, sourcePlayer: ctx.sourcePlayer });
+                        await ee._resolveEffect(eff, chainContext);
                     }
                 }
             },
         }),
     ]);
 
-    // E048: Emergency Provisions — Destroy own Spell/Traps, heal 300 per card
+    // E048: Emergency Provisions — Destroy chosen Spell/Traps, heal 300 per card
     effectEngine.registerCardEffects('E048', [
         createEffect({
             cardId: 'E048',
             trigger: 'SELF',
-            description: 'Destroy own Spell/Traps for 300 LP each',
-            execute: (gs, ctx, ee) => {
-                let healed = 0;
+            description: 'Destroy chosen Spell/Traps for 300 LP each',
+            execute: async (gs, ctx, ee) => {
+                // Gather eligible set cards (exclude Emergency Provisions itself)
+                const eligible = [];
                 for (let i = 0; i < 5; i++) {
                     const card = ctx.sourcePlayer.spellTrapZone[i];
                     if (card && card.instanceId !== ctx.source.instanceId) {
-                        ctx.sourcePlayer.graveyard.push(card);
-                        ctx.sourcePlayer.spellTrapZone[i] = null;
+                        eligible.push({ card, slot: i });
+                    }
+                }
+                if (eligible.length === 0) {
+                    gs.log('EFFECT', 'Emergency Provisions: No other Spell/Trap cards to destroy.');
+                    return;
+                }
+                // Let player choose which cards to destroy one at a time
+                let healed = 0;
+                let remaining = [...eligible];
+                while (remaining.length > 0) {
+                    const options = [
+                        ...remaining.map(e => ({ label: `Destroy ${e.card.name}`, value: e.card.instanceId, cardId: e.card.cardId })),
+                        { label: 'Done (stop destroying)', value: 'done' },
+                    ];
+                    const chosen = await ee.requestChoice(options, `Emergency Provisions: Choose a card to destroy (${healed / 300} destroyed so far)`);
+                    if (!chosen || chosen.value === 'done') break;
+                    const entry = remaining.find(e => e.card.instanceId === chosen.value);
+                    if (entry) {
+                        ctx.sourcePlayer.graveyard.push(entry.card);
+                        ctx.sourcePlayer.spellTrapZone[entry.slot] = null;
                         healed += 300;
-                        gs.log('EFFECT', `${card.name} destroyed for 300 LP.`);
+                        gs.log('EFFECT', `${entry.card.name} destroyed for 300 LP.`);
+                        remaining = remaining.filter(e => e.card.instanceId !== chosen.value);
                     }
                 }
                 if (healed > 0) ee.healLP(ctx.sourcePlayer.id, healed);

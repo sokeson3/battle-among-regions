@@ -7,6 +7,7 @@ import { PHASES } from '../engine/GameState.js';
 import { DuelDeckBuilderUI } from './DuelDeckBuilderUI.js';
 import * as SharedUI from './SharedUI.js';
 import * as MatchHistory from '../online/MatchHistory.js';
+import { CosmeticsManager, RemoteCosmetics, DEFAULT_COSMETICS, PLAYMATS, CARD_SLEEVES, AVATAR_FRAMES, EMOTE_SETS } from './CosmeticsManager.js';
 
 export class GameUI {
   /**
@@ -15,6 +16,7 @@ export class GameUI {
   constructor(controller) {
     this.controller = controller;
     this.app = document.getElementById('app');
+    this.cosmetics = new CosmeticsManager();
     this.selectedCard = null;
     this.attackingUnit = null;
     this.currentScreen = 'menu';
@@ -114,7 +116,7 @@ export class GameUI {
   // ─── Online Game Lifecycle ───────────────────────────────
 
   /** Called by OnlineGameUI when a match starts. Takes over all in-game rendering. */
-  startOnlineGame(net, myPlayerId) {
+  startOnlineGame(net, myPlayerId, opponentCosmetics = null) {
     this.isOnline = true;
     this.net = net;
     this.myPlayerId = myPlayerId;
@@ -124,6 +126,8 @@ export class GameUI {
     this.attackingUnit = null;
     this.pendingPlacement = null;
     this.selectedCard = null;
+    // Store opponent cosmetics (received from server)
+    this._opponentCosmetics = opponentCosmetics ? new RemoteCosmetics(opponentCosmetics) : DEFAULT_COSMETICS;
     // Reset animation tracking
     this._lastHandSizes = {};
     this._lastLP = {};
@@ -141,6 +145,27 @@ export class GameUI {
     this.myPlayerId = null;
     this._onlineState = null;
     this._onlineMatchStartedAt = null;
+    this._opponentCosmetics = null;
+  }
+
+  /**
+   * Get the correct cosmetics object for a given player.
+   * - Online mode: local player uses this.cosmetics, opponent uses _opponentCosmetics
+   * - AI/campaign mode: player 0 uses this.cosmetics, AI uses DEFAULT_COSMETICS
+   * - Local 2P mode: both players use this.cosmetics (shared device)
+   */
+  _getPlayerCosmetics(player) {
+    if (!player) return this.cosmetics;
+    if (this.isOnline) {
+      return player.id === this.myPlayerId ? this.cosmetics : (this._opponentCosmetics || DEFAULT_COSMETICS);
+    }
+    const gs = this._gs;
+    if (gs && (gs.gameMode === 'ai' || gs.gameMode === 'campaign')) {
+      // Player 0 is human, rest are AI — AI gets default cosmetics
+      return player.id === 0 ? this.cosmetics : DEFAULT_COSMETICS;
+    }
+    // Local 2P — same screen, same person, same cosmetics
+    return this.cosmetics;
   }
 
   /** Wire network events for in-game phase. Called by startOnlineGame(). */
@@ -168,6 +193,7 @@ export class GameUI {
       this.myPlayerId = msg.yourPlayerId;
       const prevState = this._onlineState;
       this._onlineState = this._hydrateOnlineState(msg.state);
+      this._hideAwaitingResponse(); // Clear any pending overlay
       if (this._onlineState.phase !== 'SETUP' && this._onlineState.phase !== 'MULLIGAN') {
         this._onUIUpdate(this._onlineState);
       }
@@ -183,7 +209,13 @@ export class GameUI {
 
     net.on('REQUEST_TARGET', (msg) => {
       this.showTargetSelection(msg.targets, msg.description, (target) => {
-        if (target) net.send('TARGET_SELECTED', { targetId: target.instanceId });
+        if (target) {
+          if (target.__lp_target || target.type === 'lp') {
+            net.send('TARGET_SELECTED', { lpTarget: true, lpPlayerId: target.playerId });
+          } else {
+            net.send('TARGET_SELECTED', { targetId: target.instanceId });
+          }
+        }
       });
     });
 
@@ -194,6 +226,7 @@ export class GameUI {
     });
 
     net.on('REQUEST_RESPONSE', (msg) => {
+      this._hideAwaitingResponse(); // Dismiss overlay for the responding player
       const cards = msg.faceDownCards.map(c => ({
         instanceId: c.instanceId, cardId: c.cardId, name: c.name,
         type: c.type, manaCost: c.manaCost,
@@ -201,7 +234,14 @@ export class GameUI {
       }));
       SharedUI.showResponseDialog(document.body, cards, (result) => {
         net.send('OPPONENT_RESPONSE', { response: result });
+      }, {
+        triggerType: msg.triggerType || '',
+        triggerContext: msg.triggerContext || null,
       });
+    });
+
+    net.on('AWAITING_RESPONSE', (msg) => {
+      this._showAwaitingResponse();
     });
 
     net.on('TOAST', (msg) => {
@@ -324,21 +364,57 @@ export class GameUI {
     this.app.innerHTML = `
       <div class="main-menu">
         <span class="version-label">v1.01</span>
-        <button class="settings-btn" id="btn-settings" title="Settings">⚙</button>
+        ${this.authService && this.authService.isLoggedIn ? `
+          <div class="profile-badge" id="profile-badge">
+            <div class="profile-badge-avatar">⚔</div>
+            <div class="profile-badge-info">
+              <span class="profile-badge-name">${this._escapeHtml(this.authService.displayName)}</span>
+              <span class="profile-badge-rank">Online</span>
+            </div>
+          </div>
+        ` : ''}
         <h1 class="menu-title">Battle Among Regions</h1>
         <p class="menu-subtitle">War for Supremacy</p>
         <div class="menu-buttons">
-          <button class="menu-btn primary" id="btn-vs-ai">⚔ vs AI</button>
-          <!-- Hot-seat buttons removed (kept for later)
-          <button class="menu-btn" id="btn-duel">Regional Match (2P)</button>
-          <button class="menu-btn" id="btn-3p">3-Player Match</button>
-          <button class="menu-btn" id="btn-4p">4-Player Match</button>
-          <button class="menu-btn campaign-glow" id="btn-war-campaign">⚔ War Campaign</button>
-          -->
-          <button class="menu-btn" id="btn-campaign">Solo Campaign</button>
-          <button class="menu-btn" id="btn-deck-builder">⚔ Deck Builder</button>
-          <button class="menu-btn online-glow" id="btn-online">🌐 Online Match</button>
-          <button class="menu-btn tutorial-glow" id="btn-tutorial">📖 Tutorial</button>
+
+          <!-- Ranked -->
+          <div class="menu-category">
+            <span class="menu-category-label">⚔ Ranked</span>
+            <div class="menu-category-items">
+              <button class="menu-btn menu-sub-btn" id="btn-ranked-war">The War Campaign</button>
+              <button class="menu-btn menu-sub-btn" id="btn-ranked-duel">Duel</button>
+            </div>
+          </div>
+
+          <div class="menu-divider"></div>
+
+          <!-- Casual -->
+          <div class="menu-category">
+            <span class="menu-category-label">🎲 Casual</span>
+            <div class="menu-category-items">
+              <button class="menu-btn menu-sub-btn" id="btn-casual-war">The War Campaign</button>
+              <button class="menu-btn menu-sub-btn" id="btn-casual-play">Casual</button>
+            </div>
+          </div>
+
+          <div class="menu-divider"></div>
+
+          <!-- Standalone items -->
+          <button class="menu-btn" id="btn-deck-builder">🛠 Deckbuilding</button>
+          <button class="menu-btn" id="btn-tutorial">📖 Tutorial</button>
+          <button class="menu-btn" id="btn-settings">⚙ Settings</button>
+
+          <div class="menu-divider"></div>
+
+          <!-- Store -->
+          <div class="menu-category">
+            <span class="menu-category-label">🏪 Store</span>
+            <div class="menu-category-items">
+              <button class="menu-btn menu-sub-btn" id="btn-store-cards">Cards for Duel</button>
+              <button class="menu-btn menu-sub-btn" id="btn-store-cosmetics">Cosmetics</button>
+            </div>
+          </div>
+
         </div>
 
         <!-- Settings Overlay -->
@@ -362,7 +438,7 @@ export class GameUI {
       </div>
     `;
 
-    // Settings button
+    // ─── Settings overlay ───────────────────────────────
     document.getElementById('btn-settings').onclick = () => {
       document.getElementById('settings-overlay').classList.add('visible');
     };
@@ -399,178 +475,182 @@ export class GameUI {
       }
     };
 
-    /* Hot-seat handlers removed (kept for later)
-    document.getElementById('btn-duel').onclick = () => { this.playerCount = 2; this.playerConfigs = []; this.showRegionSelect(0, 'duel'); };
-    document.getElementById('btn-3p').onclick = () => { this.playerCount = 3; this.playerConfigs = []; this.showRegionSelect(0, 'duel'); };
-    document.getElementById('btn-4p').onclick = () => { this.playerCount = 4; this.playerConfigs = []; this.showRegionSelect(0, 'duel'); };
-    document.getElementById('btn-war-campaign').onclick = () => {
-      if (this.warCampaignUI) {
-        this.warCampaignUI.showPlayerCountSelect();
-      }
-    };
-    */
-    document.getElementById('btn-vs-ai').onclick = () => { this.showAIRegionSelect(); };
-    document.getElementById('btn-campaign').onclick = () => {
-      if (this.campaignUI) {
-        const progress = this.campaignUI.progress;
-        if (progress.playerRegion) {
-          this.campaignUI.showCampaignMap();
-        } else {
-          this.campaignUI.showRegionSelect();
+    // ─── Ranked: The War Campaign (online) ──────────────
+    document.getElementById('btn-ranked-war').onclick = async () => {
+      if (this.onlineUI) {
+        const connected = await this.onlineUI.connectToServer();
+        if (connected && this.warCampaignUI) {
+          this.warCampaignUI.isOnline = true;
+          this.warCampaignUI.onlineUI = this.onlineUI;
+          this.warCampaignUI.net = this.onlineUI.net;
+          this.warCampaignUI._isInWarCampaign = true;
+          if (!this.warCampaignUI.deckBuilder) {
+            const { DeckBuilderUI } = await import('./DeckBuilderUI.js');
+            this.warCampaignUI.deckBuilder = new DeckBuilderUI(document.getElementById('app'), this.controller.cardDB);
+          }
+          this.warCampaignUI._showQuickWarMatch();
+        } else if (!connected) {
+          this._showMenuToast('Failed to connect to server. Make sure the server is running.');
         }
       }
     };
-    document.getElementById('btn-tutorial').onclick = () => {
-      if (this.tutorialUI) {
-        this.tutorialUI.showTutorial();
+
+    // ─── Ranked: Duel (online) ──────────────────────────
+    document.getElementById('btn-ranked-duel').onclick = async () => {
+      if (this.onlineUI) {
+        const connected = await this.onlineUI.connectToServer();
+        if (connected) {
+          this.onlineUI._showDuelQuickMatch();
+        } else {
+          this._showMenuToast('Failed to connect to server. Make sure the server is running.');
+        }
       }
     };
+
+    // ─── Casual: The War Campaign (online) ────────────
+    document.getElementById('btn-casual-war').onclick = async () => {
+      if (this.onlineUI) {
+        const connected = await this.onlineUI.connectToServer();
+        if (connected && this.warCampaignUI) {
+          this.warCampaignUI.showOnline(this.onlineUI);
+        } else if (!connected) {
+          this._showMenuToast('Failed to connect to server. Make sure the server is running.');
+        }
+      }
+    };
+
+    // ─── Casual: Casual (online) ─────────────────────────
+    document.getElementById('btn-casual-play').onclick = async () => {
+      if (this.onlineUI) {
+        const connected = await this.onlineUI.connectToServer();
+        if (connected) {
+          this.onlineUI.showCasualLobby();
+        } else {
+          this._showMenuToast('Failed to connect to server. Make sure the server is running.');
+        }
+      }
+    };
+
+    // ─── Deckbuilding ───────────────────────────────────
     document.getElementById('btn-deck-builder').onclick = () => {
       if (this.deckBuilderUI) {
         this.deckBuilderUI.show();
       }
     };
-    document.getElementById('btn-online').onclick = async () => {
-      if (this.onlineUI) {
-        const connected = await this.onlineUI.connectToServer();
-        if (connected) {
-          this.onlineUI.showLobby();
-        } else {
-          this.app.innerHTML += `
-            <div class="toast-message show" style="position:fixed;bottom:20px;left:50%;transform:translateX(-50%)">
-              Failed to connect to server. Make sure the server is running.
-            </div>
-          `;
-          setTimeout(() => {
-            const t = document.querySelector('.toast-message');
-            if (t) t.remove();
-          }, 3000);
-        }
+
+    // ─── Tutorial ───────────────────────────────────────
+    document.getElementById('btn-tutorial').onclick = () => {
+      if (this.tutorialUI) {
+        this.tutorialUI.showTutorial();
       }
     };
+
+    // ─── Store: Cards for Duel ──────────────────────────
+    document.getElementById('btn-store-cards').onclick = () => {
+      this.showCardStore();
+    };
+
+    // ─── Store: Cosmetics ───────────────────────────────
+    document.getElementById('btn-store-cosmetics').onclick = () => {
+      this.showCosmeticsShop();
+    };
+
+    // ─── Profile Badge ──────────────────────────────────
+    const profileBadge = document.getElementById('profile-badge');
+    if (profileBadge && this.authService) {
+      profileBadge.onclick = () => this._showProfilePanel();
+    }
+  }
+
+  /** Show a toast message on the menu screen */
+  _showMenuToast(message) {
+    // Remove any existing toast
+    const existing = document.querySelector('.toast-message');
+    if (existing) existing.remove();
+    const toast = document.createElement('div');
+    toast.className = 'toast-message show';
+    toast.style.cssText = 'position:fixed;bottom:20px;left:50%;transform:translateX(-50%)';
+    toast.textContent = message;
+    this.app.appendChild(toast);
+    setTimeout(() => toast.remove(), 3000);
   }
 
   // ─── vs AI Mode ─────────────────────────────────────────────
 
-  showAIRegionSelect() {
+  async showAIRegionSelect() {
     this.currentScreen = 'region-select';
 
-    this.app.innerHTML = `
-      <div class="region-select">
-        <button class="global-menu-btn" id="btn-menu">☰ Menu</button>
-        <h2>Choose Your Region</h2>
-        <p class="player-label">vs AI — Select your homeland</p>
-        <div class="region-grid">
-          ${this._renderRegionCard('Northern', 'north', 'Resilient defenders. Masters of healing and fortification.', [])}
-          ${this._renderRegionCard('Eastern', 'east', 'Cunning strategists. Spell mastery and shadow tactics.', [])}
-          ${this._renderRegionCard('Southern', 'south', 'Aggressive warriors. Raw power and piercing strikes.', [])}
-          ${this._renderRegionCard('Western', 'west', 'Adaptable tricksters. Unit synergy and effect manipulation.', [])}
-        </div>
-      </div>
-    `;
-    this._wireGlobalMenuButton();
+    if (!this.deckBuilderUI) return;
 
-    document.querySelectorAll('.region-card').forEach(card => {
-      card.onclick = async () => {
-        const region = card.dataset.region;
-        const config = { name: 'You', region };
+    const result = await this.deckBuilderUI.showDeckSelect('You');
+    if (!result) { this.showMenu(); return; } // User pressed back
 
-        // Offer deck choice if deck builder is available
-        if (this.deckBuilderUI) {
-          const deckIds = await this.deckBuilderUI.showDeckChoice(region, 'You');
-          if (deckIds) {
-            config.deckCardIds = deckIds;
-          }
+    const { region, deckCardIds } = result;
+    const config = { name: 'You', region };
+    if (deckCardIds) config.deckCardIds = deckCardIds;
+
+    // Connect to server for AI game (bypass OnlineGameUI lobby events)
+    if (this.onlineUI) {
+      try {
+        const net = this.onlineUI.net;
+        // Disconnect any previous connection
+        if (net.connected || net.ws) {
+          net.disconnect();
+        }
+        net.removeAllListeners();
+
+        // Connect directly without wiring lobby events
+        const envUrl = typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_SERVER_URL;
+        let url;
+        if (envUrl) {
+          url = envUrl;
+        } else if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+          url = `ws://${window.location.hostname}:4000`;
+        } else {
+          const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+          url = `${protocol}//${window.location.host}`;
         }
 
-        // Connect to server for AI game (bypass OnlineGameUI lobby events)
-        if (this.onlineUI) {
-          try {
-            const net = this.onlineUI.net;
-            // Disconnect any previous connection
-            if (net.connected || net.ws) {
-              net.disconnect();
-            }
-            net.removeAllListeners();
+        await net.connect(url);
 
-            // Connect directly without wiring lobby events
-            const envUrl = typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_SERVER_URL;
-            let url;
-            if (envUrl) {
-              url = envUrl;
-            } else if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
-              url = `ws://${window.location.hostname}:4000`;
-            } else {
-              const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-              url = `${protocol}//${window.location.host}`;
-            }
+        // Wire only the MATCH_FOUND handler — skip ROOM_CREATED/SEARCHING etc.
+        net.on('MATCH_FOUND', (msg) => {
+          this.net = net;
+          this.startOnlineGame(net, 0); // Human is always player 0
+        });
 
-            await net.connect(url);
-
-            // Wire only the MATCH_FOUND handler — skip ROOM_CREATED/SEARCHING etc.
-            net.on('MATCH_FOUND', (msg) => {
-              this.net = net;
-              this.startOnlineGame(net, 0); // Human is always player 0
-            });
-
-            // Send PLAY_VS_AI request
-            net.playVsAI(config.name, region, 'medium');
-            return;
-          } catch (e) {
-            // fall through to error
-          }
-        }
-        // Show connection error
-        alert('Could not connect to server. Please make sure the server is running.');
-      };
-    });
+        // Send PLAY_VS_AI request
+        net.playVsAI(config.name, region, 'medium');
+        return;
+      } catch (e) {
+        // fall through to error
+      }
+    }
+    // Show connection error
+    alert('Could not connect to server. Please make sure the server is running.');
   }
 
-  showRegionSelect(playerIndex, gameMode) {
+  async showRegionSelect(playerIndex, gameMode) {
     this.currentScreen = 'region-select';
     const selectedRegions = this.playerConfigs.map(p => p.region);
     const playerNum = playerIndex + 1;
 
-    this.app.innerHTML = `
-      <div class="region-select">
-        <button class="global-menu-btn" id="btn-menu">☰ Menu</button>
-        <h2>Choose Your Region</h2>
-        <p class="player-label">Player ${playerNum} of ${this.playerCount}</p>
-        <div class="region-grid">
-          ${this._renderRegionCard('Northern', 'north', 'Resilient defenders. Masters of healing and fortification.', selectedRegions)}
-          ${this._renderRegionCard('Eastern', 'east', 'Cunning strategists. Spell mastery and shadow tactics.', selectedRegions)}
-          ${this._renderRegionCard('Southern', 'south', 'Aggressive warriors. Raw power and piercing strikes.', selectedRegions)}
-          ${this._renderRegionCard('Western', 'west', 'Adaptable tricksters. Unit synergy and effect manipulation.', selectedRegions)}
-        </div>
-      </div>
-    `;
-    this._wireGlobalMenuButton();
+    if (!this.deckBuilderUI) return;
 
-    document.querySelectorAll('.region-card:not(.disabled)').forEach(card => {
-      card.onclick = async () => {
-        const region = card.dataset.region;
-        const config = {
-          name: `Player ${playerNum}`,
-          region,
-        };
+    const result = await this.deckBuilderUI.showDeckSelect(`Player ${playerNum}`, selectedRegions);
+    if (!result) { this.showMenu(); return; } // User pressed back
 
-        // Offer deck choice if deck builder is available
-        if (this.deckBuilderUI) {
-          const deckIds = await this.deckBuilderUI.showDeckChoice(region, `Player ${playerNum}`);
-          if (deckIds) {
-            config.deckCardIds = deckIds;
-          }
-        }
+    const { region, deckCardIds } = result;
+    const config = { name: `Player ${playerNum}`, region };
+    if (deckCardIds) config.deckCardIds = deckCardIds;
 
-        this.playerConfigs.push(config);
+    this.playerConfigs.push(config);
 
-        if (playerIndex < this.playerCount - 1) {
-          this.showRegionSelect(playerIndex + 1, gameMode);
-        } else {
-          this.startGame(gameMode);
-        }
-      };
-    });
+    if (playerIndex < this.playerCount - 1) {
+      this.showRegionSelect(playerIndex + 1, gameMode);
+    } else {
+      this.startGame(gameMode);
+    }
   }
 
   _renderRegionCard(region, cssClass, desc, selectedRegions) {
@@ -948,6 +1028,15 @@ export class GameUI {
       if (onContinue) {
         onContinue();
       } else {
+        // Show "Your Turn" / "Opponent's Turn" banner like in AI/online modes
+        const gs = this._gs;
+        if (gs && !this.isOnline) {
+          const activePlayer = gs.getActivePlayer();
+          const isFixedPerspective = gs.gameMode === 'campaign' || gs.gameMode === 'ai';
+          const viewingPlayer = isFixedPerspective ? gs.players[0] : activePlayer;
+          const label = viewingPlayer.id === activePlayer.id ? 'Your Turn' : "Opponent's Turn";
+          this._showTurnBanner(label, `Round ${gs.roundCounter}`);
+        }
         this.render();
       }
     };
@@ -958,6 +1047,11 @@ export class GameUI {
   render() {
     // Clean up any orphaned floating UI elements
     document.querySelectorAll('.popup-hover-preview, .card-flying, .hand-select-banner, .turn-banner, .destruction-particle, .mana-crystal-float, .chain-flash').forEach(e => e.remove());
+
+    // Clean up stale body-level overlays that can block interactions
+    // (awaiting-response, field-target banners/overlays)
+    this._hideAwaitingResponse();
+    document.querySelectorAll('.field-target-overlay, .field-target-banner').forEach(e => e.remove());
 
     const gs = this._gs;
     if (!gs) return;
@@ -987,7 +1081,7 @@ export class GameUI {
         ${this._renderPlayerBar(opponent, 'top', false)}
 
         <!-- Opponent field -->
-        <div class="field-rows">
+        <div class="field-rows ${this._getPlaymatLandmarkClass(opponent)}" ${this._getPlaymatImageStyle(opponent)}>
           <div class="field-landmark-col">
             ${this._renderLandmarkSlot(opponent)}
           </div>
@@ -1009,7 +1103,7 @@ export class GameUI {
         ${this._renderPhaseBar(gs)}
 
         <!-- Player field -->
-        <div class="field-rows">
+        <div class="field-rows ${this._getPlaymatLandmarkClass(p1)}" ${this._getPlaymatImageStyle(p1)}>
           <div class="field-landmark-col">
             ${this._renderLandmarkSlot(p1)}
           </div>
@@ -1135,14 +1229,15 @@ export class GameUI {
   // ─── Component Renderers ──────────────────────────────────
 
   _renderPlayerBar(player, position, isActive) {
-    const lpPct = Math.max(0, (player.lp / 3000) * 100);
+    const lpPct = Math.min(100, Math.max(0, (player.lp / 3000) * 100));
     const lpClass = lpPct > 50 ? 'healthy' : lpPct > 25 ? 'warning' : 'danger';
     const regionClass = this._getRegionClass(player.region);
+    const frameClass = this._getPlayerCosmetics(player).getAvatarFrameClass();
 
     return `
-      <div class="player-bar ${position} ${isActive ? 'active' : ''}" data-player="${player.id}">
+      <div class="player-bar ${position} ${isActive ? 'active' : ''} ${frameClass}" data-player="${player.id}">
         <div class="player-identity">
-          <div class="player-avatar ${regionClass}">${player.name[0]}</div>
+          <div class="player-avatar ${regionClass} ${frameClass ? 'has-frame' : ''}">${player.name[0]}</div>
           <div>
             <div class="player-name">${player.name}</div>
             <div class="player-region-label">${player.region}</div>
@@ -1186,7 +1281,7 @@ export class GameUI {
               <div class="card-slot has-card" data-slot="${i}" data-instance="${card.instanceId}">
                 <div class="game-card ${regionClass} ${posClass} ${damagedClass} ${buffed ? 'buffed' : ''} ${card.silenced ? 'silenced' : ''}"
                      data-instance="${card.instanceId}" data-player="${player.id}" data-card-id="${card.cardId}">
-                  ${this._renderCardVisual(card)}
+                  ${this._renderCardVisual(card, player)}
                   ${statTokens}
                 </div>
               </div>
@@ -1205,11 +1300,20 @@ export class GameUI {
         ${player.spellTrapZone.map((card, i) => {
       if (card) {
         if (!card.faceUp) {
+          if (!isOpponent) {
+            // Own face-down card: show sleeve back (owner can click to view)
+            return `
+                <div class="card-slot has-card" data-slot="${i}">
+                  <div class="game-card own-face-down" data-instance="${card.instanceId}" data-player="${player.id}" data-card-id="${card.cardId}">
+                    ${this._renderSleeveVisual('Set card', player)}
+                  </div>
+                </div>
+              `;
+          }
           return `
                 <div class="card-slot has-card" data-slot="${i}">
                   <div class="game-card face-down" data-instance="${card.instanceId}" data-player="${player.id}" data-card-id="${card.cardId}">
-                    <img class="card-image" src="./Background.webp" alt="Face-down"
-                         style="width:100%;height:100%;object-fit:contain;border-radius:var(--radius-card);background:#0a0c14" />
+                    ${this._renderSleeveVisual('Face-down', player)}
                   </div>
                 </div>
               `;
@@ -1217,7 +1321,7 @@ export class GameUI {
         return `
               <div class="card-slot has-card" data-slot="${i}">
                 <div class="game-card ${this._getRegionClass(card.region)}" data-instance="${card.instanceId}" data-player="${player.id}" data-card-id="${card.cardId}">
-                  ${this._renderCardVisual(card)}
+                  ${this._renderCardVisual(card, player)}
                 </div>
               </div>
             `;
@@ -1251,9 +1355,18 @@ export class GameUI {
   }
 
   _renderSideZone(player, side) {
+    const playerCos = this._getPlayerCosmetics(player);
+    const sleeve = playerCos.getCardSleeve(player.region);
+    const hasImage = sleeve.useImage && sleeve.imagePath;
+    // For image sleeves: use background shorthand to override .deck-pile default gradient
+    // For CSS sleeves: apply the cssClass which uses its own !important background
+    const sleeveStyle = hasImage
+      ? `background: url('${sleeve.imagePath}') center/cover no-repeat !important;`
+      : '';
+    const sleeveClass = hasImage ? '' : playerCos.getSleeveClass(player.region);
     return `
       <div class="side-zone">
-        <div class="deck-pile" style="position:relative; overflow:hidden; background-image:url('./Background.webp'); background-size:cover; background-position:center; border-radius:var(--radius-card); outline:1px solid rgba(255,255,255,0.2);">
+        <div class="deck-pile ${sleeveClass}" style="position:relative; overflow:hidden; ${sleeveStyle} border-radius:var(--radius-card); outline:1px solid rgba(255,255,255,0.2);">
           <div style="position:absolute; inset:0; background:rgba(0,0,0,0.15);"></div>
           <span style="position:relative; z-index:1; background:rgba(0,0,0,0.75); padding:2px 8px; border-radius:4px; font-weight:bold; box-shadow:0 0 4px rgba(0,0,0,0.8);">${player.deckCount !== undefined ? player.deckCount : (player.deck ? player.deck.length : 0)}</span>
         </div>
@@ -1269,7 +1382,7 @@ export class GameUI {
    */
   _renderOpponentCompact(player) {
     const regionClass = this._getRegionClass(player.region);
-    const lpPct = Math.max(0, (player.lp / 3000) * 100);
+    const lpPct = Math.min(100, Math.max(0, (player.lp / 3000) * 100));
     const lpClass = lpPct > 50 ? 'healthy' : lpPct > 25 ? 'warning' : 'danger';
     const landmark = player.landmarkZone;
 
@@ -1300,7 +1413,7 @@ export class GameUI {
                 <div class="game-card compact-card ${this._getRegionClass(card.region)}"
                      data-instance="${card.instanceId}" data-player="${player.id}" data-card-id="${card.cardId}"
                      style="width:55px;height:77px">
-                  ${this._renderCardVisual(card)}
+                  ${this._renderCardVisual(card, player)}
                   ${statTokens}
                 </div>`;
       }
@@ -1336,7 +1449,7 @@ export class GameUI {
       // Handle hidden cards (opponent's hand in online mode)
       if (card.hidden) {
         return `<div class="hand-card game-card face-down" style="width:var(--card-w);height:var(--card-h)">
-          <img class="card-image" src="./Background.webp" alt="Hidden" style="width:100%;height:100%;object-fit:cover;border-radius:var(--radius-card)" />
+          ${this._renderSleeveVisual('Hidden', player)}
         </div>`;
       }
 
@@ -1377,7 +1490,7 @@ export class GameUI {
       return `
               <div class="hand-card game-card ${this._getRegionClass(card.region)} ${canPlay ? 'playable' : ''}"
                    data-instance="${card.instanceId}" data-type="${card.type}" data-card-id="${card.cardId}">
-                ${this._renderCardVisual(card)}
+                ${this._renderCardVisual(card, player)}
                 ${handStatTokens}
               </div>
             `;
@@ -1391,13 +1504,70 @@ export class GameUI {
    * Render card as image-only — the card art IS the full visual.
    * No stat overlays, no mana cost badges, no name text.
    */
-  _renderCardVisual(card) {
+  _renderCardVisual(card, ownerPlayer = null) {
     const imgPath = `./output-web/${card.cardId}.webp`;
+    const cos = ownerPlayer ? this._getPlayerCosmetics(ownerPlayer) : this.cosmetics;
+    const holoOverlay = cos.isHolo(card.cardId) ? '<div class="holo-shimmer"></div>' : '';
     return `
       <img class="card-image" src="${imgPath}" alt="${card.name}" 
            onerror="this.parentElement.classList.add('no-art')" loading="lazy"
            style="width:100%;height:100%;object-fit:cover;border-radius:var(--radius-card)" />
+      ${holoOverlay}
     `;
+  }
+
+  /**
+   * Render the card sleeve (card back) for face-down / hidden cards.
+   * Uses equipped cosmetic sleeve style or default Background image.
+   * @param {string} altText - Alt text for the image
+   * @param {object} ownerPlayer - The player who owns this card (for per-player cosmetics)
+   */
+  _renderSleeveVisual(altText = 'Face-down', ownerPlayer = null) {
+    const cos = ownerPlayer ? this._getPlayerCosmetics(ownerPlayer) : this.cosmetics;
+    const region = ownerPlayer ? ownerPlayer.region : null;
+    const sleeve = cos.getCardSleeve(region);
+    if (sleeve.useImage && sleeve.imagePath) {
+      return `<img class="card-image" src="${sleeve.imagePath}" alt="${altText}"
+                   style="width:100%;height:100%;object-fit:cover;border-radius:var(--radius-card)" />`;
+    }
+    const sleeveClass = cos.getSleeveClass(region);
+    return `<div class="card-image card-sleeve ${sleeveClass}" style="width:100%;height:100%;border-radius:var(--radius-card)"></div>`;
+  }
+
+  /**
+   * Returns the playmat image path for a given player's zone.
+   * In online mode, uses each player's own cosmetics.
+   * In local/AI/campaign mode, always uses the human player's cosmetics
+   * so landmarks played to the opponent's zone still show purchased playmats.
+   */
+  _getPlaymatImageForZone(player) {
+    if (this.isOnline) {
+      const cos = this._getPlayerCosmetics(player);
+      return cos.getFieldImageForPlayer(player);
+    }
+    // Local/AI/Campaign: use the human's cosmetics for any landmark zone
+    return this.cosmetics.getFieldImageForPlayer(player);
+  }
+
+  /**
+   * Returns an inline style attribute for image-based playmat backgrounds
+   * based on the player's active landmark and purchased playmats.
+   */
+  _getPlaymatImageStyle(player) {
+    const imagePath = this._getPlaymatImageForZone(player);
+    if (imagePath) {
+      return `style="background-image:url('${imagePath}'); background-size:cover; background-position:center;"`;
+    }
+    return '';
+  }
+
+  /**
+   * Returns CSS class for the playmat based on the player's active landmark.
+   * Applies 'playmat-landmark' class when a purchased landmark playmat is active.
+   */
+  _getPlaymatLandmarkClass(player) {
+    const imagePath = this._getPlaymatImageForZone(player);
+    return imagePath ? 'playmat-landmark' : '';
   }
 
   /**
@@ -1450,7 +1620,10 @@ export class GameUI {
   _renderActionPanel(gs) {
     // During AI/online opponent turn, hide action buttons — player cannot act
     if (!this._isMyTurn()) {
-      return `<div class="action-panel"><span class="waiting-label">Opponent's Turn</span></div>`;
+      return `<div class="action-panel"><div class="waiting-label"><span class="waiting-dot"></span>Opponent's Turn</div>
+        <button class="action-btn cosmetic-toggle-btn" id="btn-cosmetics-toggle" title="Toggle Cosmetics">🎨</button>
+        <button class="action-btn emote-btn" id="btn-emote" title="Send Emote">💬</button>
+      </div>`;
     }
 
     const phase = gs.phase;
@@ -1473,7 +1646,9 @@ export class GameUI {
       buttons.push(`<button class="action-btn danger" id="btn-cancel-action">✕ Cancel</button>`);
     }
 
-    // Menu button is now in the phase bar, not here
+    // Cosmetics toggle + Emote button
+    buttons.push(`<button class="action-btn cosmetic-toggle-btn" id="btn-cosmetics-toggle" title="Toggle Cosmetics">🎨</button>`);
+    buttons.push(`<button class="action-btn emote-btn" id="btn-emote" title="Send Emote">💬</button>`);
 
     return `<div class="action-panel">${buttons.join('')}</div>`;
   }
@@ -1534,13 +1709,11 @@ export class GameUI {
     const handContainer = document.querySelector('.hand-container');
 
     if (handContainer && handCards.length > 0) {
-      // Capture original (un-scaled) bounding rects for hit-testing
-      const cardRects = handCards.map(el => el.getBoundingClientRect());
-
       // Find which card a point is over (last match wins = topmost in stack order)
+      // Rects are computed live so window resizes don't stale the hit-test
       const getCardAtPoint = (x, y) => {
         for (let i = handCards.length - 1; i >= 0; i--) {
-          const r = cardRects[i];
+          const r = handCards[i].getBoundingClientRect();
           if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) {
             return i;
           }
@@ -1591,7 +1764,8 @@ export class GameUI {
         e.stopPropagation();
         // Block field card interactions when it's not our turn (allow zoom only)
         if (!this._isMyTurn()) {
-          if (!el.classList.contains('face-down')) {
+          // Allow zoom on face-up cards AND own face-down cards (own-face-down)
+          if (!el.classList.contains('face-down') || el.classList.contains('own-face-down')) {
             this._showCardZoom(cardId || el.querySelector('img')?.alt);
           }
           return;
@@ -1777,6 +1951,18 @@ export class GameUI {
         this.render();
       };
     }
+
+    // Cosmetics toggle button (in-game)
+    const cosToggle = document.getElementById('btn-cosmetics-toggle');
+    if (cosToggle) {
+      cosToggle.onclick = (e) => { e.stopPropagation(); this._showCosmeticsToggle(); };
+    }
+
+    // Emote button
+    const emoteBtn = document.getElementById('btn-emote');
+    if (emoteBtn) {
+      emoteBtn.onclick = (e) => { e.stopPropagation(); this._showEmotePicker(); };
+    }
   }
 
   _onHandCardClick(el, player, gs) {
@@ -1844,6 +2030,16 @@ export class GameUI {
         const totalMana = (player.primaryMana || 0) + (player.spellMana || 0);
         const hasSTSlot = (player.spellTrapZone || []).some(s => s === null);
         canActivate = totalMana >= (card.manaCost || 0);
+        // Check if spell requires targets and none exist (UI hint — server still validates)
+        if (canActivate && this.controller?.effectEngine) {
+          const effects = this.controller.effectEngine.getEffects(card.cardId);
+          for (const effect of effects) {
+            if ((effect.trigger === 'SELF' || effect.trigger === 'ON_SPELL_ACTIVATE') && effect.requiresTarget && effect.targets) {
+              const validTargets = effect.targets(this._gs, { source: card, sourcePlayer: player });
+              if (validTargets.length === 0) { canActivate = false; break; }
+            }
+          }
+        }
         canSet = hasSTSlot; // Setting a spell is free (mana paid on activation)
       } else {
         canActivate = this.controller.actionValidator.canPlaySpell(player.id, card).valid;
@@ -1962,24 +2158,60 @@ export class GameUI {
       }
       // Main phase: activate ability (once per round effects)
       const isMainPhase2 = gs.phase === PHASES.MAIN1 || gs.phase === PHASES.MAIN2;
-      const hasActivatedAbility = unit.effectTriggers?.includes('ACTIVATED');
-      const canAbility = isMainPhase2 && hasActivatedAbility && !unit.activatedThisRound && !unit.activatedThisTurn;
-      if (canAbility) {
-        options.push({ label: '⚡ Activate', value: 'activate_ability', icon: '⚡' });
+      if (isMainPhase2) {
+        let canAbility;
+        if (this.isOnline) {
+          const hasActivatedAbility = unit.effectTriggers?.includes('ACTIVATED');
+          canAbility = hasActivatedAbility && !unit.activatedThisRound && !unit.activatedThisTurn && !unit.silenced;
+        } else {
+          canAbility = this.controller.actionValidator.canActivateAbility(player.id, unit).valid;
+        }
+        if (canAbility) {
+          options.push({ label: '⚡ Activate', value: 'activate_ability', icon: '⚡' });
+        }
       }
     }
 
     if (spellTrap && spellTrap.faceUp === false) {
       const isMainPhase = gs.phase === PHASES.MAIN1 || gs.phase === PHASES.MAIN2;
       if (isMainPhase && spellTrap.type === 'Spell') {
-        options.push({ label: '✦ Activate', value: 'activate_set', icon: '✦' });
+        let canActivateSet;
+        if (this.isOnline) {
+          const totalMana = (player.primaryMana || 0) + (player.spellMana || 0);
+          canActivateSet = totalMana >= (spellTrap.manaCost || 0) && !spellTrap.setThisTurn;
+          // Check if set spell requires targets and none exist
+          if (canActivateSet && this.controller?.effectEngine) {
+            const effects = this.controller.effectEngine.getEffects(spellTrap.cardId);
+            for (const effect of effects) {
+              if ((effect.trigger === 'SELF' || effect.trigger === 'ON_SPELL_ACTIVATE') && effect.requiresTarget && effect.targets) {
+                const validTargets = effect.targets(this._gs, { source: spellTrap, sourcePlayer: player });
+                if (validTargets.length === 0) { canActivateSet = false; break; }
+              }
+            }
+          }
+        } else {
+          canActivateSet = this.controller.actionValidator.canActivateSetSpell(player.id, spellTrap).valid;
+        }
+        if (canActivateSet) {
+          options.push({ label: '✦ Activate', value: 'activate_set', icon: '✦' });
+        }
       }
       // Allow face-down Traps with SELF trigger to be activated during Main Phase (e.g. E048)
       if (isMainPhase && spellTrap.type === 'Trap' && !spellTrap.setThisTurn) {
-        // Show activate option for traps with SELF trigger
-        // In online mode, we don't have effectEngine access, so show for all and let server validate
+        // Show activate option for traps with SELF trigger only
         if (this.isOnline) {
-          options.push({ label: '⚡ Activate', value: 'activate_set_trap', icon: '⚡' });
+          // Only show activate for traps with SELF trigger (same as local mode)
+          let hasSelfTrigger = false;
+          if (this.controller?.effectEngine) {
+            const effects = this.controller.effectEngine.getEffects(spellTrap.cardId);
+            hasSelfTrigger = effects.some(e => e.trigger === 'SELF');
+          }
+          if (hasSelfTrigger) {
+            const totalMana = (player.primaryMana || 0) + (player.spellMana || 0);
+            if (totalMana >= (spellTrap.manaCost || 0)) {
+              options.push({ label: '⚡ Activate', value: 'activate_set_trap', icon: '⚡' });
+            }
+          }
         } else {
           const effects = this.controller.effectEngine.getEffects(spellTrap.cardId);
           const hasSelfTrigger = effects.some(e => e.trigger === 'SELF');
@@ -1996,9 +2228,15 @@ export class GameUI {
       }
     }
 
-    // Always allow zoom
+    // Add zoom option — always available regardless of other actions
+    // Show View Card for face-up cards AND own face-down cards
     const cardId = el.dataset.cardId;
-    options.push({ label: '🔍 View Card', value: 'zoom', icon: '🔍' });
+    if (!el.classList.contains('face-down') || el.classList.contains('own-face-down')) {
+      options.push({ label: '🔍 View Card', value: 'zoom', icon: '🔍' });
+    }
+
+    // If no options at all (e.g. face-down with nothing to activate), skip
+    if (options.length === 0) return;
 
     this._showCardActionMenu(rect, options, (choice) => {
       if (choice.value === 'attack') {
@@ -2159,10 +2397,10 @@ export class GameUI {
   _showFieldTargetSelection(targets, fieldInstanceIds, description, callback) {
     let resolved = false;
 
-    // Create a semi-transparent overlay that doesn't block field cards
+    // Create a semi-transparent overlay that catches clicks on non-target areas
     const overlay = document.createElement('div');
     overlay.className = 'field-target-overlay';
-    overlay.style.cssText = 'position:fixed;inset:0;z-index:150;pointer-events:none';
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:150;pointer-events:auto;background:rgba(0,0,0,0.3)';
 
     // Floating banner with description and cancel
     const banner = document.createElement('div');
@@ -2214,22 +2452,44 @@ export class GameUI {
     };
 
     // Click handler that intercepts clicks on highlighted field cards
+    // Clicking anywhere else (non-target area) cancels the selection
     const fieldClickHandler = (e) => {
       if (resolved) return;
 
-      // Walk up from the clicked element to find a card-slot with data-instance
-      let el = e.target;
-      while (el && !el.dataset?.instance) {
-        el = el.parentElement;
+      // Ignore clicks on the banner (let its own handlers deal with it)
+      if (banner.contains(e.target)) return;
+
+      // Use elementsFromPoint to look through the overlay and find card-slot
+      // elements underneath (z-index stacking contexts prevent normal e.target
+      // from reaching cards behind the overlay).
+      let el = null;
+      const elements = document.elementsFromPoint(e.clientX, e.clientY);
+      for (const candidate of elements) {
+        // Walk up from each element at this point to find a card-slot
+        let walk = candidate;
+        while (walk && !walk.dataset?.instance) {
+          walk = walk.parentElement;
+        }
+        if (walk && fieldInstanceIds.has(walk.dataset.instance)) {
+          el = walk;
+          break;
+        }
       }
 
-      if (el && fieldInstanceIds.has(el.dataset.instance)) {
+      if (el) {
         e.stopPropagation();
         e.preventDefault();
         resolved = true;
         const idx = fieldInstanceIds.get(el.dataset.instance);
         cleanup();
         callback(targets[idx]);
+      } else {
+        // Clicked on a non-target area — cancel selection
+        e.stopPropagation();
+        e.preventDefault();
+        resolved = true;
+        cleanup();
+        callback(null);
       }
     };
 
@@ -2324,8 +2584,13 @@ export class GameUI {
   // ─── Opponent Response Dialog ────────────────────────────
 
   showOpponentResponseDialog(player, callback, chainContext = {}) {
+    // Traps: any player can chain. Spells: only the active (turn) player can chain,
+    // UNLESS E006 (Meditation Adept) is on the field — then spells act as traps.
+    const gs = this.controller ? this.controller.gameState : null;
+    const activeId = gs ? gs.activePlayerIndex : -1;
+    const hasE006 = player.getFieldUnits().some(u => u.cardId === 'E006' && !u.silenced);
     const faceDownCards = player.getFaceDownCards().filter(c =>
-      (c.type === 'Spell' || c.type === 'Trap') && !c.setThisTurn
+      (c.type === 'Trap' || (c.type === 'Spell' && (player.id === activeId || hasE006))) && !c.setThisTurn
     );
     if (faceDownCards.length === 0) {
       callback({ activate: false });
@@ -2365,6 +2630,12 @@ export class GameUI {
       }
       return { card, canActivate, reason };
     });
+
+    // If no cards are eligible, auto-pass without showing the dialog
+    if (!cardStates.some(cs => cs.canActivate)) {
+      callback({ activate: false });
+      return;
+    }
 
     // Build trigger description for context
     let triggerDesc = 'an action was performed';
@@ -2427,11 +2698,64 @@ export class GameUI {
           ${targetHtml}
         </div>
       `;
+    } else if (triggerType === 'spell' && triggerContext.spell) {
+      const s = triggerContext.spell;
+      attackContextHtml = `
+        <div class="response-trigger-context trigger-card">
+          <img src="./output-web/${s.cardId}.webp" alt="${s.name}" class="popup-card-thumb" data-card-id="${s.cardId}"
+               style="width:60px;height:84px;object-fit:contain;border-radius:6px;border:1px solid var(--glass-border)" />
+          <span style="font-size:0.8rem;color:var(--text-primary);font-weight:600">${s.name}</span>
+        </div>`;
+    } else if (triggerType === 'ability' && triggerContext.abilityCard) {
+      const a = triggerContext.abilityCard;
+      attackContextHtml = `
+        <div class="response-trigger-context trigger-card">
+          <img src="./output-web/${a.cardId}.webp" alt="${a.name}" class="popup-card-thumb" data-card-id="${a.cardId}"
+               style="width:60px;height:84px;object-fit:contain;border-radius:6px;border:1px solid var(--glass-border)" />
+          <span style="font-size:0.8rem;color:var(--text-primary);font-weight:600">${a.name}</span>
+        </div>`;
+    } else if (triggerType === 'summon' && triggerContext.summonedCard) {
+      const u = triggerContext.summonedCard;
+      attackContextHtml = `
+        <div class="response-trigger-context trigger-card">
+          <img src="./output-web/${u.cardId}.webp" alt="${u.name}" class="popup-card-thumb" data-card-id="${u.cardId}"
+               style="width:60px;height:84px;object-fit:contain;border-radius:6px;border:1px solid var(--glass-border)" />
+          <span style="font-size:0.8rem;color:var(--text-primary);font-weight:600">${u.name}</span>
+        </div>`;
+    } else if (triggerType === 'destroy' && triggerContext.destroyedCard) {
+      const d = triggerContext.destroyedCard;
+      attackContextHtml = `
+        <div class="response-trigger-context trigger-card">
+          <img src="./output-web/${d.cardId}.webp" alt="${d.name}" class="popup-card-thumb" data-card-id="${d.cardId}"
+               style="width:60px;height:84px;object-fit:contain;border-radius:6px;border:1px solid var(--glass-border);opacity:0.7;filter:grayscale(0.4)" />
+          <span style="font-size:0.8rem;color:var(--lp-red);font-weight:600">${d.name} destroyed</span>
+        </div>`;
+    }
+
+    // ── Build descriptive title based on trigger type ──
+    let titleIcon = '⚡';
+    let titleText = 'Respond?';
+    let titleClass = '';
+    switch (triggerType) {
+      case 'attack':
+        titleIcon = '⚔'; titleText = 'Attack Declared — Respond?'; titleClass = 'trigger-attack'; break;
+      case 'spell':
+        titleIcon = '✨'; titleText = 'Spell Activated — Respond?'; titleClass = 'trigger-spell'; break;
+      case 'summon':
+        titleIcon = '📥'; titleText = 'Unit Summoned — Respond?'; titleClass = 'trigger-summon'; break;
+      case 'destroy':
+        titleIcon = '💀'; titleText = 'Unit Destroyed — Respond?'; titleClass = 'trigger-destroy'; break;
+      case 'ability':
+        titleIcon = '🔮'; titleText = 'Ability Activated — Respond?'; titleClass = 'trigger-ability'; break;
+      case 'phase_change':
+        titleIcon = '🏁'; titleText = 'Phase Change — Respond?'; titleClass = 'trigger-phase'; break;
+      case 'set':
+        titleIcon = '📋'; titleText = 'Card Set — Respond?'; titleClass = 'trigger-set'; break;
     }
 
     overlay.innerHTML = `
       <div class="choice-dialog response-card-dialog">
-        <h3 style="color:var(--gold)">${player.name} — Respond?</h3>
+        <h3 class="response-title ${titleClass}" style="color:var(--gold)">${titleIcon} ${titleText}</h3>
         <p style="color:var(--text-muted);font-size:0.8rem;margin-bottom:8px">
           ${triggerDesc.charAt(0).toUpperCase() + triggerDesc.slice(1)}. Activate a face-down card?
         </p>
@@ -2459,7 +2783,7 @@ export class GameUI {
       </div>
     `;
 
-    this.app.appendChild(overlay);
+    document.body.appendChild(overlay);
 
     // Click outside dialog to pass
     overlay.onclick = (e) => {
@@ -2852,44 +3176,157 @@ export class GameUI {
   _showAttackAnimation(attacker, targetUnit, targetPlayer) {
     if (!attacker) return;
 
+    // ── Compute combat preview (purely visual — engine does real calc) ──
+    const atkATK = attacker.currentATK ?? attacker.baseATK ?? 0;
+    const atkDEF = attacker.currentDEF ?? attacker.baseDEF ?? 0;
+    const atkDmgTaken = attacker.damageTaken ?? 0;
+    const atkRemainingDEF = atkDEF - atkDmgTaken;
+
+    let defATK = 0, defDEF = 0, defDmgTaken = 0, defRemainingDEF = 0;
+    let attackerDestroyed = false, defenderDestroyed = false;
+    let dmgToDefender = 0, dmgToAttacker = 0;
+    let excessToDefenderLP = 0, excessToAttackerLP = 0;
+    let isDirectAttack = !targetUnit;
+
+    if (targetUnit) {
+      defATK = targetUnit.currentATK ?? targetUnit.baseATK ?? 0;
+      defDEF = targetUnit.currentDEF ?? targetUnit.baseDEF ?? 0;
+      defDmgTaken = targetUnit.damageTaken ?? 0;
+      defRemainingDEF = defDEF - defDmgTaken;
+
+      if (targetUnit.position === 'ATK') {
+        // ATK vs ATK
+        dmgToDefender = atkATK;
+        dmgToAttacker = defATK;
+        excessToDefenderLP = Math.max(0, atkATK - defRemainingDEF);
+        excessToAttackerLP = Math.max(0, defATK - atkRemainingDEF);
+        defenderDestroyed = (defDmgTaken + atkATK) >= defDEF;
+        attackerDestroyed = (atkDmgTaken + defATK) >= atkDEF;
+      } else {
+        // ATK vs DEF
+        dmgToDefender = atkATK;
+        dmgToAttacker = 0;
+        defenderDestroyed = (defDmgTaken + atkATK) >= defDEF;
+        if (atkATK < defRemainingDEF) {
+          excessToAttackerLP = defRemainingDEF - atkATK; // rebound
+        }
+      }
+    }
+
+    // ── Build overlay ──
     const overlay = document.createElement('div');
     overlay.className = 'attack-anim-overlay';
 
+    // Generate spark particles HTML
+    const sparkTypes = ['spark-fire', 'spark-gold', 'spark-white'];
+    let sparksHtml = '';
+    for (let i = 0; i < 12; i++) {
+      const type = sparkTypes[i % 3];
+      const angle = (i / 12) * 360 + (Math.random() * 30 - 15);
+      const dist = 40 + Math.random() * 60;
+      const sx = Math.cos(angle * Math.PI / 180) * dist;
+      const sy = Math.sin(angle * Math.PI / 180) * dist;
+      sparksHtml += `<div class="attack-spark ${type}" style="--sx:${sx}px;--sy:${sy}px"></div>`;
+    }
+
+    // ── Attacker card ──
+    const attackerStatHtml = `
+      <div class="attack-anim-stats">
+        <span class="stat-atk">ATK ${atkATK}</span>
+        <span class="stat-def">DEF ${atkDEF - atkDmgTaken}</span>
+      </div>
+    `;
+
+    // ── Target card / LP ──
     let targetHtml = '';
     if (targetUnit) {
+      const defStatHtml = `
+        <div class="attack-anim-stats">
+          <span class="stat-atk">ATK ${defATK}</span>
+          <span class="stat-def">DEF ${defDEF - defDmgTaken}</span>
+        </div>
+      `;
       targetHtml = `
-        <div class="attack-anim-card">
+        <div class="attack-anim-card${defenderDestroyed ? ' unit-destroyed' : ''}">
           <img src="./output-web/${targetUnit.cardId}.webp" alt="${targetUnit.name}" />
-          <span>${targetUnit.name}</span>
+          <span class="attack-anim-name">${targetUnit.name}</span>
+          ${defStatHtml}
+          <div class="attack-anim-damage dmg-dealt" style="top:-20px;left:50%;transform:translateX(-50%)">-${dmgToDefender}</div>
+          <div class="attack-anim-outcome ${defenderDestroyed ? 'outcome-destroyed' : 'outcome-survived'}">${defenderDestroyed ? 'DESTROYED' : 'SURVIVED'}</div>
         </div>
       `;
     } else if (targetPlayer) {
       targetHtml = `
         <div class="attack-anim-card attack-anim-direct">
           <span class="attack-anim-lp-icon">💥</span>
-          <span>${targetPlayer.name}</span>
+          <span class="attack-anim-name">${targetPlayer.name}</span>
+          <div class="attack-anim-damage dmg-lp" style="top:-20px;left:50%;transform:translateX(-50%)">-${atkATK} LP</div>
+          <div class="attack-anim-outcome outcome-direct">DIRECT HIT</div>
         </div>
       `;
     }
 
+    // ── Attacker damage received (only in unit combat) ──
+    let attackerDmgHtml = '';
+    let attackerOutcomeHtml = '';
+    if (targetUnit && dmgToAttacker > 0) {
+      attackerDmgHtml = `<div class="attack-anim-damage dmg-dealt" style="top:-20px;left:50%;transform:translateX(-50%)">-${dmgToAttacker}</div>`;
+      attackerOutcomeHtml = `<div class="attack-anim-outcome ${attackerDestroyed ? 'outcome-destroyed' : 'outcome-survived'}">${attackerDestroyed ? 'DESTROYED' : 'SURVIVED'}</div>`;
+    } else if (targetUnit && targetUnit.position !== 'ATK') {
+      // ATK vs DEF — attacker takes no damage but may take rebound
+      if (excessToAttackerLP > 0) {
+        attackerDmgHtml = `<div class="attack-anim-damage dmg-lp" style="top:-20px;left:50%;transform:translateX(-50%)">-${excessToAttackerLP} LP</div>`;
+      }
+      attackerOutcomeHtml = `<div class="attack-anim-outcome outcome-survived">OK</div>`;
+    }
+
     overlay.innerHTML = `
-      <div class="attack-anim-content">
-        <div class="attack-anim-card">
+      <div class="attack-anim-flash"></div>
+      <div class="attack-anim-content attack-phase-entrance">
+        <div class="attack-anim-card${attackerDestroyed ? ' unit-destroyed' : ''}">
           <img src="./output-web/${attacker.cardId}.webp" alt="${attacker.name}" />
-          <span>${attacker.name}</span>
+          <span class="attack-anim-name">${attacker.name}</span>
+          ${attackerStatHtml}
+          ${attackerDmgHtml}
+          ${attackerOutcomeHtml}
         </div>
-        <div class="attack-anim-slash">⚔</div>
+        <div class="attack-anim-clash">
+          <div class="attack-anim-slash">⚔</div>
+          <div class="attack-anim-slash-line"></div>
+          ${sparksHtml}
+        </div>
         ${targetHtml}
       </div>
     `;
 
     document.body.appendChild(overlay);
 
-    // Auto-remove after animation
+    const content = overlay.querySelector('.attack-anim-content');
+
+    // ── Phase progression ──
+    // Phase 1: Entrance (0–600ms) — already active via attack-phase-entrance class
+    setTimeout(() => {
+      // Phase 2: Clash (600–1400ms)
+      content.classList.remove('attack-phase-entrance');
+      content.classList.add('attack-phase-clash');
+    }, 600);
+
+    setTimeout(() => {
+      // Phase 3: Damage numbers (1400–2600ms)
+      content.classList.remove('attack-phase-clash');
+      content.classList.add('attack-phase-damage');
+    }, 1400);
+
+    setTimeout(() => {
+      // Phase 4: Outcome banners (2600–3400ms)
+      content.classList.add('attack-phase-outcome');
+    }, 2600);
+
+    // Fade out and remove
     setTimeout(() => {
       overlay.classList.add('attack-anim-fade');
       setTimeout(() => overlay.remove(), 400);
-    }, 1800);
+    }, 3400);
   }
 
   _showGraveyardViewer(player) {
@@ -3185,8 +3622,10 @@ export class GameUI {
   }
 
   _showTurnBanner(title, subtitle) {
+    const isOpponentTurn = title.toLowerCase().includes('opponent');
+    const bannerType = isOpponentTurn ? 'opponent-turn' : 'your-turn';
     const banner = document.createElement('div');
-    banner.className = 'turn-banner';
+    banner.className = `turn-banner ${bannerType}`;
     banner.innerHTML = `
       <div class="turn-banner-content">
         <div class="turn-banner-line"></div>
@@ -3197,6 +3636,35 @@ export class GameUI {
     `;
     document.body.appendChild(banner);
     setTimeout(() => banner.remove(), 1700);
+  }
+
+  _showAwaitingResponse() {
+    this._hideAwaitingResponse(); // Remove any existing
+    this._awaitingResponse = true;
+    const overlay = document.createElement('div');
+    overlay.id = 'awaiting-response-overlay';
+    overlay.style.cssText = `
+      position: fixed; inset: 0; z-index: 9000;
+      display: flex; align-items: center; justify-content: center;
+      background: rgba(0,0,0,0.45); pointer-events: all;
+    `;
+    overlay.innerHTML = `
+      <div style="
+        background: rgba(20,20,30,0.92); border: 1px solid rgba(255,255,255,0.15);
+        border-radius: 12px; padding: 24px 40px; text-align: center;
+        box-shadow: 0 4px 30px rgba(0,0,0,0.5);
+      ">
+        <div style="font-size: 28px; margin-bottom: 8px;">⏳</div>
+        <div style="color: #e0e0e0; font-size: 16px; font-weight: 500;">Awaiting opponent...</div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+  }
+
+  _hideAwaitingResponse() {
+    this._awaitingResponse = false;
+    const overlay = document.getElementById('awaiting-response-overlay');
+    if (overlay) overlay.remove();
   }
 
   _showManaCrystal(parentEl, diff) {
@@ -3348,5 +3816,633 @@ export class GameUI {
       cleanup();
       callback(null);
     };
+  }
+
+  // ─── Card Store (Main Menu) ───────────────────────────────────
+
+  showCardStore() {
+    this.currentScreen = 'card-store';
+    const PURCHASE_KEY = 'bar_purchased_cards';
+
+    // Load purchased cards
+    const loadPurchased = () => {
+      try {
+        const raw = localStorage.getItem(PURCHASE_KEY);
+        return raw ? JSON.parse(raw) : [];
+      } catch { return []; }
+    };
+    const savePurchased = (list) => {
+      localStorage.setItem(PURCHASE_KEY, JSON.stringify(list));
+    };
+
+    // Price by card type
+    const getPrice = (type) => {
+      switch (type) {
+        case 'Unit': return '0.99';
+        case 'Spell': return '1.49';
+        case 'Trap': return '1.99';
+        case 'Landmark': return '2.99';
+        default: return '0.99';
+      }
+    };
+    const getTypeIcon = (type) => {
+      switch (type) {
+        case 'Unit': return '⚔';
+        case 'Spell': return '✦';
+        case 'Trap': return '⚡';
+        case 'Landmark': return '🏰';
+        default: return '🃏';
+      }
+    };
+
+    const regions = ['Northern', 'Eastern', 'Southern', 'Western'];
+    const regionColors = {
+      Northern: { primary: 'var(--north-primary, #4fc3f7)', bg: 'rgba(79, 195, 247, 0.08)', border: 'rgba(79, 195, 247, 0.3)', glow: 'rgba(79, 195, 247, 0.15)' },
+      Eastern: { primary: 'var(--east-primary, #9575cd)', bg: 'rgba(149, 117, 205, 0.08)', border: 'rgba(149, 117, 205, 0.3)', glow: 'rgba(149, 117, 205, 0.15)' },
+      Southern: { primary: 'var(--south-primary, #ef5350)', bg: 'rgba(239, 83, 80, 0.08)', border: 'rgba(239, 83, 80, 0.3)', glow: 'rgba(239, 83, 80, 0.15)' },
+      Western: { primary: 'var(--west-primary, #ffb74d)', bg: 'rgba(255, 183, 77, 0.08)', border: 'rgba(255, 183, 77, 0.3)', glow: 'rgba(255, 183, 77, 0.15)' },
+    };
+
+    const activeRegion = this._cardStoreRegion || 'Northern';
+    const purchased = loadPurchased();
+
+    // Get all cards for all regions
+    const allCards = this.controller.cardDB ? this.controller.cardDB.getAllPlayableCards() : [];
+    const regionCards = allCards.filter(c => c.region === activeRegion);
+    const typeOrder = { Unit: 0, Spell: 1, Trap: 2, Landmark: 3 };
+    regionCards.sort((a, b) => (typeOrder[a.type] ?? 9) - (typeOrder[b.type] ?? 9) || a.manaCost - b.manaCost);
+
+    // Check if all region cards are purchased
+    const regionAllOwned = regionCards.length > 0 && regionCards.every(c => purchased.includes(c.id));
+    const rc = regionColors[activeRegion];
+
+    this.app.innerHTML = `
+      <div class="card-store">
+        <div class="card-store-header">
+          <button class="menu-btn" id="card-store-back">← Back</button>
+          <h1 class="card-store-title">🏪 Card Shop</h1>
+          <span class="card-store-subtitle">Cards for Duel</span>
+        </div>
+
+        <div class="card-store-tabs">
+          ${regions.map(r => {
+      const rclr = regionColors[r];
+      const isActive = r === activeRegion;
+      return `<button class="card-store-tab ${isActive ? 'active' : ''}" data-region="${r}"
+                      style="${isActive ? `background:${rclr.bg};border-color:${rclr.border};color:${rclr.primary};box-shadow:0 0 12px ${rclr.glow}` : ''}">
+              ${r}
+            </button>`;
+    }).join('')}
+        </div>
+
+        <div class="card-store-content">
+          <!-- Buy Full Region Banner -->
+          <div class="card-store-region-banner" style="border-color:${rc.border};background:linear-gradient(135deg, ${rc.bg}, rgba(0,0,0,0.2))">
+            <div class="card-store-banner-info">
+              <span class="card-store-banner-icon">🎁</span>
+              <div>
+                <div class="card-store-banner-title">Get all ${activeRegion} cards</div>
+                <div class="card-store-banner-desc">${regionCards.length} cards · Save over 50%</div>
+              </div>
+            </div>
+            <div class="card-store-banner-action">
+              ${regionAllOwned
+        ? '<span class="card-store-owned-badge">✓ All Owned</span>'
+        : `<span class="card-store-banner-price">£19.99</span>
+                   <button class="card-store-buy-region-btn" id="buy-region" style="border-color:${rc.border};color:${rc.primary}">Buy Region</button>`}
+            </div>
+          </div>
+
+          <!-- Card Grid -->
+          <div class="card-store-grid">
+            ${regionCards.map(card => {
+          const owned = purchased.includes(card.id);
+          const price = getPrice(card.type);
+          return `
+                <div class="card-store-item ${owned ? 'owned' : ''}" data-card-id="${card.id}">
+                  <div class="card-store-item-img-wrap">
+                    <img class="card-store-item-img" src="./output-web/${card.id}.webp" alt="${card.name}"
+                         onerror="this.style.display='none'" loading="lazy" />
+                    ${owned ? '<div class="card-store-owned-overlay"><span>✓</span></div>' : ''}
+                  </div>
+
+                  <div class="card-store-item-footer">
+                    ${owned
+              ? '<span class="card-store-owned-tag">✓ Owned</span>'
+              : `<span class="card-store-price">£${price}</span>
+                         <button class="card-store-buy-btn" data-buy-id="${card.id}">Buy</button>`}
+                  </div>
+                </div>
+              `;
+        }).join('')}
+            ${regionCards.length === 0 ? '<div class="card-store-empty">No cards available for this region.</div>' : ''}
+          </div>
+        </div>
+      </div>
+    `;
+
+    // --- Event handlers ---
+
+    // Back
+    document.getElementById('card-store-back').onclick = () => {
+      this._cardStoreRegion = null;
+      this.showMenu();
+    };
+
+    // Region tabs
+    document.querySelectorAll('.card-store-tab').forEach(tab => {
+      tab.onclick = () => {
+        this._cardStoreRegion = tab.dataset.region;
+        this.showCardStore();
+      };
+    });
+
+    // Buy region
+    const buyRegionBtn = document.getElementById('buy-region');
+    if (buyRegionBtn) {
+      buyRegionBtn.onclick = () => {
+        const current = loadPurchased();
+        regionCards.forEach(c => {
+          if (!current.includes(c.id)) current.push(c.id);
+        });
+        savePurchased(current);
+        this._cardStoreRegion = activeRegion;
+        this.showCardStore();
+      };
+    }
+
+    // Buy individual card
+    document.querySelectorAll('.card-store-buy-btn').forEach(btn => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        const cardId = btn.dataset.buyId;
+        const current = loadPurchased();
+        if (!current.includes(cardId)) {
+          current.push(cardId);
+          savePurchased(current);
+        }
+        this._cardStoreRegion = activeRegion;
+        this.showCardStore();
+      };
+    });
+  }
+
+  // ─── Cosmetics Shop (Main Menu) ──────────────────────────────
+
+  async showCosmeticsShop(activeTab = 'playmats') {
+    this.currentScreen = 'cosmetics';
+    const cm = this.cosmetics;
+
+    // Sync owned cosmetics from server if logged in
+    if (this.authService && this.authService.isLoggedIn) {
+      await cm.syncFromServer(this.authService);
+    }
+
+    // Map cosmetic type names to store catalog types
+    const storeTypeMap = { cardSleeve: 'sleeve', avatarFrame: 'avatarFrame', emoteSet: 'emoteSet' };
+
+    // Render generic cosmetic category (sleeves, avatars, emotes)
+    const renderCategory = (title, items, type, equippedId) => {
+      return items.map(item => {
+        const isDefault = item.id === 'default';
+        const storeType = storeTypeMap[type] || type;
+        const owned = isDefault || cm.ownsCosmetic(storeType, item.id);
+        // For sleeves: equipped per-region; for others: single equipped ID
+        const isEquipped = (type === 'cardSleeve' && item.region)
+          ? cm.getSleeveForRegion(item.region) === item.id
+          : item.id === equippedId;
+        // Show actual image for sleeves that have PNG art
+        const previewContent = (item.useImage && item.imagePath)
+          ? `<img src="${item.imagePath}" alt="${item.name}" style="width:100%;height:100%;object-fit:cover;border-radius:var(--radius-md)" />`
+          : `<span class="cosmetic-preview-icon">${type === 'cardSleeve' ? '🃏' : type === 'avatarFrame' ? '👤' : type === 'emoteSet' ? '💬' : '✨'}</span>`;
+        // Region badge for region-locked items
+        const regionBadge = item.region
+          ? `<span style="font-size:0.65rem;color:var(--text-muted);font-style:italic">${item.region} region</span>`
+          : '';
+        // Action button: Buy or Equip
+        let actionHtml;
+        if (!owned && item.price) {
+          actionHtml = `
+            <div style="display:flex;align-items:center;gap:8px">
+              <span class="playmat-shop-price">${item.price}</span>
+              <button class="menu-btn cosmetic-buy-btn" data-store-type="${storeType}" data-id="${item.id}">Buy</button>
+            </div>`;
+        } else {
+          actionHtml = `
+            <button class="menu-btn cosmetic-equip-btn ${isEquipped ? 'equipped' : ''}" data-type="${type}" data-id="${item.id}">
+              ${isEquipped ? '✓ Equipped' : 'Equip'}
+            </button>`;
+        }
+        return `
+          <div class="cosmetic-item ${isEquipped ? 'equipped' : ''} ${!owned && !isDefault ? 'locked' : ''}" data-type="${type}" data-id="${item.id}">
+            <div class="cosmetic-item-preview ${item.cssClass || ''}" style="${item.useImage && item.imagePath ? 'padding:0;overflow:hidden' : ''}">
+              ${previewContent}
+            </div>
+            <div class="cosmetic-item-info">
+              <span class="cosmetic-item-name">${item.name}</span>
+              <span class="cosmetic-item-desc">${item.description}</span>
+              ${regionBadge}
+            </div>
+            ${actionHtml}
+          </div>`;
+      }).join('');
+    };
+
+    // Render landmark playmat grid
+    const renderPlaymatGrid = () => {
+      return PLAYMATS.map(pm => {
+        const owned = cm.ownsPlaymat(pm.cardId);
+        const isEquipped = owned && cm.isPlaymatEquipped(pm.cardId);
+        const regionClass = this._getRegionClass(pm.region);
+        return `
+          <div class="playmat-shop-item ${owned ? 'owned' : ''} ${isEquipped ? 'equipped' : ''}" data-card-id="${pm.cardId}">
+            <div class="playmat-shop-art">
+              <img src="${pm.imagePath}" alt="${pm.name}" loading="lazy" />
+              <div class="playmat-shop-overlay">
+                <span class="playmat-shop-region ${regionClass}">${pm.region}</span>
+              </div>
+            </div>
+            <div class="playmat-shop-info">
+              <span class="playmat-shop-name">${pm.name}</span>
+              <span class="playmat-shop-desc">${pm.description}</span>
+            </div>
+            <div class="playmat-shop-footer">
+              ${owned
+            ? `<span class="playmat-shop-owned">✓ Owned</span>
+               <button class="menu-btn playmat-equip-btn ${isEquipped ? 'equipped' : ''}" data-card-id="${pm.cardId}">
+                 ${isEquipped ? '✓ Equipped' : 'Equip'}
+               </button>`
+            : `<span class="playmat-shop-price">${pm.price}</span>
+                   <button class="menu-btn playmat-buy-btn" data-card-id="${pm.cardId}">Buy</button>`
+          }
+            </div>
+          </div>`;
+      }).join('');
+    };
+
+    this.app.innerHTML = `
+      <div class="cosmetics-shop">
+        <div class="cosmetics-header">
+          <button class="menu-btn" id="cosmetics-back">← Back</button>
+          <h1 class="cosmetics-title">🎨 Cosmetics Shop</h1>
+          <span></span>
+        </div>
+        <div class="cosmetics-tabs">
+          <button class="cosmetics-tab ${activeTab === 'playmats' ? 'active' : ''}" data-tab="playmats">🗺 Playmats</button>
+          <button class="cosmetics-tab ${activeTab === 'sleeves' ? 'active' : ''}" data-tab="sleeves">🃏 Sleeves</button>
+          <button class="cosmetics-tab ${activeTab === 'avatars' ? 'active' : ''}" data-tab="avatars">👤 Avatars</button>
+          <button class="cosmetics-tab ${activeTab === 'emotes' ? 'active' : ''}" data-tab="emotes">💬 Emotes</button>
+          <button class="cosmetics-tab ${activeTab === 'holo' ? 'active' : ''}" data-tab="holo">✨ Holo Cards</button>
+        </div>
+
+        <div class="cosmetics-content" id="cosmetics-content">
+          <div class="cosmetics-panel" data-panel="playmats" style="${activeTab !== 'playmats' ? 'display:none' : ''}">
+            <h2>Landmark Playmats</h2>
+            <p style="color:var(--text-muted);font-size:0.85rem;margin-bottom:16px">Purchase a playmat to transform your battlefield when you play the matching Landmark card.</p>
+            <div class="playmat-shop-grid">${renderPlaymatGrid()}</div>
+          </div>
+          <div class="cosmetics-panel" data-panel="sleeves" style="${activeTab !== 'sleeves' ? 'display:none' : ''}">
+            <h2>Card Sleeves</h2>
+            <div class="cosmetic-grid">${renderCategory('Sleeves', CARD_SLEEVES, 'cardSleeve', null)}</div>
+          </div>
+          <div class="cosmetics-panel" data-panel="avatars" style="${activeTab !== 'avatars' ? 'display:none' : ''}">
+            <h2>Avatar Frames</h2>
+            <div class="cosmetic-grid">${renderCategory('Avatars', AVATAR_FRAMES, 'avatarFrame', cm.equipped.avatarFrame)}</div>
+          </div>
+          <div class="cosmetics-panel" data-panel="emotes" style="${activeTab !== 'emotes' ? 'display:none' : ''}">
+            <h2>Emote Sets</h2>
+            <div class="cosmetic-grid">${renderCategory('Emotes', EMOTE_SETS, 'emoteSet', cm.equipped.emoteSet)}</div>
+          </div>
+          <div class="cosmetics-panel" data-panel="holo" style="${activeTab !== 'holo' ? 'display:none' : ''}">
+            <h2>Holographic Cards</h2>
+            <p style="color:var(--text-muted);font-size:0.85rem;margin-bottom:12px">Toggle holographic effect on individual cards. Changes are instant.</p>
+            <div class="holo-card-grid">
+              ${this.controller.cardDB ? Object.values(this.controller.cardDB).filter(c => c.type === 'Unit' && !c.cardId.endsWith('a')).slice(0, 40).map(card => `
+                <div class="holo-card-item ${cm.isHolo(card.cardId) ? 'holo-active' : ''}" data-card-id="${card.cardId}">
+                  <img src="./output-web/${card.cardId}.webp" alt="${card.name}" onerror="this.parentElement.style.display='none'" />
+                  <div class="holo-overlay-preview ${cm.isHolo(card.cardId) ? 'active' : ''}"></div>
+                  <span class="holo-card-name">${card.name}</span>
+                </div>
+              `).join('') : '<p>Card database not loaded.</p>'}
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+
+    // Back button
+    document.getElementById('cosmetics-back').onclick = () => this.showMenu();
+
+    // Tabs
+    document.querySelectorAll('.cosmetics-tab').forEach(tab => {
+      tab.onclick = () => {
+        document.querySelectorAll('.cosmetics-tab').forEach(t => t.classList.remove('active'));
+        tab.classList.add('active');
+        document.querySelectorAll('.cosmetics-panel').forEach(p => p.style.display = 'none');
+        const panel = document.querySelector(`.cosmetics-panel[data-panel="${tab.dataset.tab}"]`);
+        if (panel) panel.style.display = '';
+      };
+    });
+
+    // Playmat buy buttons (Stripe checkout)
+    document.querySelectorAll('.playmat-buy-btn').forEach(btn => {
+      btn.onclick = async (e) => {
+        e.stopPropagation();
+        if (!this.authService || !this.authService.isLoggedIn) {
+          this._showMenuToast('Please log in to purchase cosmetics.');
+          return;
+        }
+        btn.disabled = true;
+        btn.textContent = '...';
+        try {
+          await this.authService.purchaseCosmetic('playmat', btn.dataset.cardId);
+        } catch (err) {
+          this._showMenuToast(err.message || 'Purchase failed.');
+        }
+        btn.disabled = false;
+        btn.textContent = 'Buy';
+      };
+    });
+
+    // Playmat equip buttons
+    document.querySelectorAll('.playmat-equip-btn').forEach(btn => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        cm.equipPlaymat(btn.dataset.cardId);
+        this.showCosmeticsShop('playmats'); // re-render, stay on playmats tab
+      };
+    });
+
+    // Equip buttons (sleeves, avatars, emotes)
+    document.querySelectorAll('.cosmetic-equip-btn').forEach(btn => {
+      btn.onclick = () => {
+        const type = btn.dataset.type;
+        const id = btn.dataset.id;
+        if (type === 'cardSleeve') cm.equipCardSleeve(id);
+        else if (type === 'avatarFrame') cm.equipAvatarFrame(id);
+        else if (type === 'emoteSet') cm.equipEmoteSet(id);
+        this.showCosmeticsShop(type === 'cardSleeve' ? 'sleeves' : type === 'avatarFrame' ? 'avatars' : 'emotes');
+      };
+    });
+
+    // Buy buttons for sleeves/frames/emotes (Stripe checkout)
+    document.querySelectorAll('.cosmetic-buy-btn').forEach(btn => {
+      btn.onclick = async (e) => {
+        e.stopPropagation();
+        if (!this.authService || !this.authService.isLoggedIn) {
+          this._showMenuToast('Please log in to purchase cosmetics.');
+          return;
+        }
+        btn.disabled = true;
+        btn.textContent = '...';
+        try {
+          await this.authService.purchaseCosmetic(btn.dataset.storeType, btn.dataset.id);
+        } catch (err) {
+          this._showMenuToast(err.message || 'Purchase failed.');
+        }
+        btn.disabled = false;
+        btn.textContent = 'Buy';
+      };
+    });
+
+    // Holo card toggles
+    document.querySelectorAll('.holo-card-item').forEach(el => {
+      el.onclick = () => {
+        cm.toggleHoloCard(el.dataset.cardId);
+        this.showCosmeticsShop('holo');
+      };
+    });
+  }
+
+  // ─── In-Game Cosmetics Toggle Panel ───────────────────────────
+
+  _showCosmeticsToggle() {
+    // Remove existing panel if open
+    const existing = document.querySelector('.cosmetics-toggle-panel');
+    if (existing) { existing.remove(); return; }
+
+    const cm = this.cosmetics;
+
+    const makeSelect = (label, items, currentId, type) => {
+      return `
+        <div class="cosm-toggle-row">
+          <span class="cosm-toggle-label">${label}</span>
+          <select class="cosm-toggle-select" data-type="${type}">
+            ${items.map(item => `<option value="${item.id}" ${item.id === currentId ? 'selected' : ''}>${item.name}</option>`).join('')}
+          </select>
+        </div>`;
+    };
+
+    const gs = this._gs;
+    const myPlayer = gs ? (this.isOnline ? gs.players[this.myPlayerId] : gs.players[0]) : null;
+    const myRegion = myPlayer ? myPlayer.region : null;
+    const regionSleeves = CARD_SLEEVES.filter(s => !s.region || s.region === myRegion);
+    const currentSleeveId = (myRegion && cm.getSleeveForRegion(myRegion)) || 'default';
+
+    const panel = document.createElement('div');
+    panel.className = 'cosmetics-toggle-panel';
+    panel.innerHTML = `
+      <div class="cosm-toggle-header">
+        <span>🎨 Cosmetics</span>
+        <button class="cosm-toggle-close">✕</button>
+      </div>
+      ${makeSelect('Card Sleeve', regionSleeves, currentSleeveId, 'cardSleeve')}
+      ${makeSelect('Avatar Frame', AVATAR_FRAMES, cm.equipped.avatarFrame, 'avatarFrame')}
+      ${makeSelect('Emote Set', EMOTE_SETS, cm.equipped.emoteSet, 'emoteSet')}
+    `;
+
+    document.body.appendChild(panel);
+
+    // Close
+    panel.querySelector('.cosm-toggle-close').onclick = () => panel.remove();
+
+    // Select change handlers
+    panel.querySelectorAll('.cosm-toggle-select').forEach(sel => {
+      sel.onchange = () => {
+        const type = sel.dataset.type;
+        const val = sel.value;
+        if (type === 'cardSleeve') cm.equipCardSleeve(val);
+        else if (type === 'avatarFrame') cm.equipAvatarFrame(val);
+        else if (type === 'emoteSet') cm.equipEmoteSet(val);
+        this.render();
+      };
+    });
+  }
+
+  // ─── Emote System ──────────────────────────────────────────────
+
+  _showEmotePicker() {
+    // Remove existing picker
+    const existing = document.querySelector('.emote-picker');
+    if (existing) { existing.remove(); return; }
+
+    const emotes = this.cosmetics.getEmotes();
+
+    const picker = document.createElement('div');
+    picker.className = 'emote-picker';
+    picker.innerHTML = emotes.map(e =>
+      `<button class="emote-btn-pick" data-emote-id="${e.id}" title="${e.label}">
+        <span class="emote-icon">${e.icon}</span>
+        <span class="emote-label">${e.label}</span>
+      </button>`
+    ).join('');
+
+    document.body.appendChild(picker);
+
+    // Auto-dismiss after 5s
+    const autoClose = setTimeout(() => picker.remove(), 5000);
+
+    picker.querySelectorAll('.emote-btn-pick').forEach(btn => {
+      btn.onclick = (ev) => {
+        ev.stopPropagation();
+        clearTimeout(autoClose);
+        picker.remove();
+        const emote = emotes.find(e => e.id === btn.dataset.emoteId);
+        if (emote) this._showEmoteBubble(emote);
+      };
+    });
+
+    // Click outside to close
+    setTimeout(() => {
+      const outsideHandler = (e) => {
+        if (!picker.contains(e.target)) {
+          clearTimeout(autoClose);
+          picker.remove();
+          document.removeEventListener('click', outsideHandler);
+        }
+      };
+      document.addEventListener('click', outsideHandler);
+    }, 50);
+  }
+
+  _showEmoteBubble(emote) {
+    const bubble = document.createElement('div');
+    bubble.className = 'emote-bubble';
+    bubble.innerHTML = `
+      <span class="emote-bubble-icon">${emote.icon}</span>
+      <span class="emote-bubble-text">${emote.label}</span>
+    `;
+    document.body.appendChild(bubble);
+
+    // Animate and remove
+    setTimeout(() => bubble.classList.add('emote-bubble-show'), 10);
+    setTimeout(() => {
+      bubble.classList.add('emote-bubble-fade');
+      setTimeout(() => bubble.remove(), 500);
+    }, 2500);
+  }
+
+  // ─── Profile Panel ─────────────────────────────────────────
+
+  async _showProfilePanel() {
+    if (!this.authService || !this.authService.isLoggedIn) return;
+
+    let profile;
+    try {
+      profile = await this.authService.getProfile();
+    } catch {
+      profile = { display_name: this.authService.displayName, ranked_points: 1000, wins: 0, losses: 0, draws: 0 };
+    }
+
+    const overlay = document.createElement('div');
+    overlay.className = 'profile-overlay';
+    overlay.innerHTML = `
+      <div class="profile-panel">
+        <div class="profile-header">
+          <h2>⚔ Profile</h2>
+          <button class="settings-close-btn" id="profile-close">✕</button>
+        </div>
+        <div class="profile-body">
+          <div class="profile-stat-row">
+            <span class="profile-stat-label">Display Name</span>
+            <span class="profile-stat-value">${this._escapeHtml(profile.display_name || '')}</span>
+          </div>
+          <div class="profile-stat-row">
+            <span class="profile-stat-label">Ranked Points</span>
+            <span class="profile-stat-value gold">${profile.ranked_points ?? 1000}</span>
+          </div>
+          <div class="profile-stat-row">
+            <span class="profile-stat-label">Wins</span>
+            <span class="profile-stat-value">${profile.wins ?? 0}</span>
+          </div>
+          <div class="profile-stat-row">
+            <span class="profile-stat-label">Losses</span>
+            <span class="profile-stat-value">${profile.losses ?? 0}</span>
+          </div>
+          <div class="profile-stat-row">
+            <span class="profile-stat-label">Draws</span>
+            <span class="profile-stat-value">${profile.draws ?? 0}</span>
+          </div>
+        </div>
+        <div class="profile-actions">
+          <button class="login-btn login-btn-secondary" id="profile-link">🔗 Link Another Device</button>
+          <button class="login-btn login-btn-secondary" id="profile-leaderboard">🏆 Leaderboard</button>
+          <button class="login-btn login-btn-ghost" id="profile-logout">Log Out</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+
+    overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+    document.getElementById('profile-close').onclick = () => overlay.remove();
+
+    // Link device
+    document.getElementById('profile-link').onclick = async () => {
+      try {
+        const { code } = await this.authService.generateLinkCode();
+        const actionsDiv = overlay.querySelector('.profile-actions');
+        actionsDiv.innerHTML = `
+          <p style="color:var(--text-secondary);text-align:center;font-size:0.85rem;margin-bottom:8px">
+            Enter this code on your other device within 5 minutes:
+          </p>
+          <div class="profile-link-code">${code}</div>
+          <button class="login-btn login-btn-ghost" id="profile-link-done">Done</button>
+        `;
+        document.getElementById('profile-link-done').onclick = () => overlay.remove();
+      } catch (err) {
+        this._showMenuToast(err.message || 'Failed to generate link code');
+      }
+    };
+
+    // Leaderboard
+    document.getElementById('profile-leaderboard').onclick = async () => {
+      try {
+        const board = await this.authService.getLeaderboard(20);
+        const body = overlay.querySelector('.profile-body');
+        body.innerHTML = `
+          <h3 style="font-family:'Cinzel',serif;color:var(--gold);margin-bottom:12px;text-align:center">🏆 Top Players</h3>
+          <div style="max-height:300px;overflow-y:auto">
+            ${board.length === 0 ? '<p style="color:var(--text-muted);text-align:center">No ranked data yet</p>' :
+            board.map((p, i) => `
+              <div class="profile-stat-row">
+                <span class="profile-stat-label">${i + 1}. ${this._escapeHtml(p.display_name)}</span>
+                <span class="profile-stat-value gold">${p.ranked_points} RP</span>
+              </div>
+            `).join('')}
+          </div>
+        `;
+        // Hide link/leaderboard/logout
+        overlay.querySelector('.profile-actions').innerHTML = `
+          <button class="login-btn login-btn-ghost" id="profile-lb-back">← Back to Profile</button>
+        `;
+        document.getElementById('profile-lb-back').onclick = () => {
+          overlay.remove();
+          this._showProfilePanel();
+        };
+      } catch (err) {
+        this._showMenuToast('Failed to load leaderboard');
+      }
+    };
+
+    // Logout
+    document.getElementById('profile-logout').onclick = async () => {
+      await this.authService.logout();
+      overlay.remove();
+      this.showMenu();
+    };
+  }
+
+  _escapeHtml(str) {
+    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
 }

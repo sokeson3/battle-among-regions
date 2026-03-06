@@ -85,6 +85,14 @@ export class GameController {
         const validation = this.actionValidator.canPlayUnit(playerId, card);
         if (!validation.valid) return { success: false, reason: validation.reason };
 
+        // E044: Time Delay Rune — opponent can only play 1 more card this turn
+        if (player._timeDelayCardsRemaining !== undefined) {
+            if (player._timeDelayCardsRemaining <= 0) {
+                return { success: false, reason: 'Time Delay Rune: You cannot play more cards this turn!' };
+            }
+            player._timeDelayCardsRemaining--;
+        }
+
         // Spend mana
         if (!this.manaSystem.spendMana(playerId, card.manaCost, false)) {
             return { success: false, reason: 'Failed to spend mana.' };
@@ -129,6 +137,7 @@ export class GameController {
 
         // Trigger "When Summoned" effects (card's own effects)
         await this.effectEngine.triggerOnSummon(card, player);
+        this._notifyUI(); // Refresh UI to show on-summon effect results (e.g. N020 damage)
 
         // Trigger landmark reactions to summon (e.g. N001 Frostfell Citadel +200 DEF for DEF summon)
         await this.effectEngine.triggerLandmarkOnSummon(card, player);
@@ -156,6 +165,14 @@ export class GameController {
 
         const validation = this.actionValidator.canPlaySpell(playerId, card);
         if (!validation.valid) return { success: false, reason: validation.reason };
+
+        // E044: Time Delay Rune — opponent can only play 1 more card this turn
+        if (player._timeDelayCardsRemaining !== undefined) {
+            if (player._timeDelayCardsRemaining <= 0) {
+                return { success: false, reason: 'Time Delay Rune: You cannot play more cards this turn!' };
+            }
+            player._timeDelayCardsRemaining--;
+        }
 
         // Spend mana
         if (!this.manaSystem.spendMana(playerId, card.manaCost, true)) {
@@ -215,6 +232,7 @@ export class GameController {
         // Execute the spell's own effect
         const effects = this.effectEngine.getEffects(card.cardId);
         let cancelled = false;
+        const spellTargets = [];
         for (const effect of effects) {
             if (effect.trigger === EFFECT_EVENTS.ON_SPELL_ACTIVATE || effect.trigger === 'SELF') {
                 const result = await this.effectEngine._resolveEffect(effect, { source: card, sourcePlayer: player });
@@ -222,6 +240,7 @@ export class GameController {
                     cancelled = true;
                     break;
                 }
+                if (result && result.target) spellTargets.push(result.target);
             }
         }
 
@@ -236,17 +255,9 @@ export class GameController {
             }
         }
 
-        // Keep spell visible on field for 2 seconds before removing
-        this._notifyUI();
-        await new Promise(resolve => setTimeout(resolve, 1200));
-
-        // Remove spell from field slot
-        if (spellSlot >= 0) {
-            player.spellTrapZone[spellSlot] = null;
-        }
-
-        // If the player cancelled target selection, refund everything
+        // If the player cancelled target selection, refund everything immediately
         if (cancelled) {
+            if (spellSlot >= 0) player.spellTrapZone[spellSlot] = null;
             this.manaSystem.addMana(playerId, card.manaCost);
             player.hand.push(card);
             card.faceUp = false;
@@ -256,13 +267,23 @@ export class GameController {
             return { success: false, reason: 'Spell cancelled.' };
         }
 
+        // Keep spell visible on field for 2 seconds before removing
+        this._notifyUI();
+        await new Promise(resolve => setTimeout(resolve, 1200));
+
+        // Remove spell from field slot
+        if (spellSlot >= 0) {
+            player.spellTrapZone[spellSlot] = null;
+        }
+
         // Send to graveyard
         player.graveyard.push(card);
 
-        // Trigger ON_SPELL_PLAY for reactive effects (S030 Pyromancer, E004 Ink Sprite, etc.)
+        // Trigger ON_SPELL_PLAY for reactive effects (S030 Pyromancer, E004 Ink Sprite, N030, etc.)
         await this.effectEngine.trigger(EFFECT_EVENTS.ON_SPELL_PLAY, {
             spell: card,
             caster: player,
+            spellTargets,
         });
 
         this._notifyUI();
@@ -299,9 +320,6 @@ export class GameController {
         this.gameState.log('SET', `${player.name} sets a card face-down.`);
         this.gameState.emit('CARD_SET', { card, player, slot });
 
-        // Ask players if they want to respond to the set
-        await this._askOpponentResponse('set', { setCard: card, settingPlayer: player });
-
         this._notifyUI();
         return { success: true, slot };
     }
@@ -336,9 +354,6 @@ export class GameController {
         this.gameState.log('SET', `${player.name} sets a Trap face-down.`);
         this.gameState.emit('CARD_SET', { card, player, slot });
 
-        // Ask players if they want to respond to the set
-        await this._askOpponentResponse('set', { setCard: card, settingPlayer: player });
-
         this._notifyUI();
         return { success: true, slot };
     }
@@ -367,9 +382,10 @@ export class GameController {
             ? this.gameState.getPlayerById(targetPlayerId)
             : player;
 
-        // If target already has a landmark, send it to graveyard
+        // If target already has a landmark, clean up its buffs and send to graveyard
         if (targetPlayer.landmarkZone) {
             const oldLandmark = targetPlayer.landmarkZone;
+            this.effectEngine._cleanupLandmarkBuffs(targetPlayer, oldLandmark);
             targetPlayer.graveyard.push(oldLandmark);
             this.gameState.log('LANDMARK', `${oldLandmark.name} is replaced and sent to the graveyard.`);
         }
@@ -407,8 +423,8 @@ export class GameController {
         if (card.type !== 'Spell') return { success: false, reason: 'Only Spells can be activated this way.' };
 
         const phase = this.gameState.phase;
-        if (phase !== PHASES.MAIN1 && phase !== PHASES.MAIN2) {
-            return { success: false, reason: 'Can only activate during Main Phase.' };
+        if (phase !== PHASES.MAIN1 && phase !== PHASES.MAIN2 && phase !== PHASES.BATTLE) {
+            return { success: false, reason: 'Can only activate during Main Phase or Battle Phase.' };
         }
 
         // Spend mana (spell mana allowed)
@@ -559,6 +575,12 @@ export class GameController {
                 }
                 this.gameState._recentlyDestroyed = [];
             }
+        } else {
+            // N047: Clear Hibernation Ward flag when attack is negated
+            // (so it doesn't leak to a future attack)
+            for (const p of this.gameState.players) {
+                p._hibernationWardActive = false;
+            }
         }
 
         // Check if battle phase should end
@@ -591,6 +613,24 @@ export class GameController {
         this.gameState.log('ABILITY', `${player.name} activates ${card.name}'s ability.`);
         this.gameState.emit('ABILITY_ACTIVATED', { card, player });
 
+        // Trigger ON_ABILITY_ACTIVATE BEFORE executing so traps like E045, W045, W050 can negate/respond
+        await this.effectEngine.trigger(EFFECT_EVENTS.ON_ABILITY_ACTIVATE, {
+            source: card,
+            caster: player,
+            abilityCard: card,
+        });
+
+        // Ask players if they want to respond
+        await this._askOpponentResponse('ability', { abilityCard: card, caster: player });
+
+        // Check if ability was negated by E045/W045
+        if (this.gameState._abilityNegate) {
+            this.gameState._abilityNegate = false;
+            this.gameState.log('EFFECT', `${card.name}'s ability was negated!`);
+            this._notifyUI();
+            return { success: true, negated: true };
+        }
+
         // Execute the card's activated effect
         const effects = this.effectEngine.getEffects(card.cardId);
         for (const effect of effects) {
@@ -598,9 +638,6 @@ export class GameController {
                 await this.effectEngine._resolveEffect(effect, { source: card, sourcePlayer: player });
             }
         }
-
-        // Ask players if they want to respond
-        await this._askOpponentResponse('ability', { abilityCard: card, caster: player });
 
         this._notifyUI();
         return { success: true };
@@ -727,8 +764,19 @@ export class GameController {
         while (consecutivePasses < playerOrder.length) {
             const player = playerOrder[currentPlayerIdx % playerOrder.length];
 
-            // Check if player has any face-down spells or traps they could activate
-            const faceDownCards = player.getFaceDownCards().filter(c => c.type === 'Spell' || c.type === 'Trap');
+            // Check if player has any face-down cards they could activate
+            // Traps: any player can chain. Spells: only the active (turn) player can chain.
+            const faceDownCards = player.getFaceDownCards().filter(c => {
+                if (c.type === 'Trap') return true;
+                if (c.type === 'Spell') {
+                    // Active player can always chain spells
+                    if (player.id === activeId) return true;
+                    // E006: Meditation Adept — owner can chain Spells as if Traps
+                    const hasE006 = player.getFieldUnits().some(u => u.cardId === 'E006' && !u.silenced);
+                    if (hasE006) return true;
+                }
+                return false;
+            });
             console.log(`⛓ P${player.id} face-down cards: ${faceDownCards.length} (${faceDownCards.map(c => `${c.name}[${c.type}]`).join(', ')})`);
             if (faceDownCards.length === 0) {
                 consecutivePasses++;
@@ -752,14 +800,29 @@ export class GameController {
                         if (player.id !== activePlayer.id) {
                             for (const unit of activePlayer.getFieldUnits()) {
                                 if (unit.cardId === 'E019' && !unit.silenced) {
-                                    if (player.lp >= 400) {
-                                        player.lp -= 400;
-                                        gs.log('EFFECT', `${player.name} pays 400 LP to activate Trap (Enigmatic Sensei).`);
+                                    if (player.lp < 400) {
+                                        gs.log('EFFECT', `${player.name} cannot pay 400 LP for Trap activation (Enigmatic Sensei).`);
+                                        consecutivePasses++;
+                                        currentPlayerIdx++;
+                                        continue;
                                     }
+                                    player.lp -= 400;
+                                    gs.log('EFFECT', `${player.name} pays 400 LP to activate Trap (Enigmatic Sensei).`);
                                     break;
                                 }
                             }
                         }
+                    }
+
+                    // E044: Time Delay Rune — check if player is restricted from playing more cards
+                    if (player._timeDelayCardsRemaining !== undefined) {
+                        if (player._timeDelayCardsRemaining <= 0) {
+                            gs.log('EFFECT', `${player.name} cannot chain more cards (Time Delay Rune).`);
+                            consecutivePasses++;
+                            currentPlayerIdx++;
+                            continue;
+                        }
+                        player._timeDelayCardsRemaining--;
                     }
 
                     // Spend mana
@@ -778,7 +841,7 @@ export class GameController {
                     gs.emit(card.type === 'Trap' ? 'TRAP_ACTIVATED' : 'SPELL_ACTIVATED', { card, player });
                     this._notifyUI();
 
-                    chainStack.push({ playerId: player.id, cardInstanceId: response.cardInstanceId, card, slotIndex });
+                    chainStack.push({ playerId: player.id, cardInstanceId: response.cardInstanceId, card, slotIndex, resolveContext: { ...triggerContext } });
                     consecutivePasses = 0; // Reset passes — other player can now respond
 
                     // Update effective trigger so traps like N046 can counter-chain
@@ -822,10 +885,10 @@ export class GameController {
             const effects = this.effectEngine.getEffects(card.cardId);
 
             if (card.type === 'Trap') {
-                // Execute all trap effects with trigger context
+                // Execute all trap effects with the trigger context from when this card was chained
                 for (const effect of effects) {
                     await this.effectEngine._resolveEffect(effect, {
-                        ...triggerContext, source: card, sourcePlayer: player,
+                        ...entry.resolveContext, source: card, sourcePlayer: player,
                     });
                 }
             } else {

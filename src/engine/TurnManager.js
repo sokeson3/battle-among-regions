@@ -137,6 +137,10 @@ export class TurnManager {
             unit.attackCount = 0;
             unit.summonedThisTurn = false;
             unit.hasChangedPositionThisTurn = false;
+            // W008/W048: Clear the "cannot attack this turn" lock
+            if (unit._cannotAttackNextTurn) {
+                unit._cannotAttackNextTurn = false;
+            }
         }
         activePlayer.unitsSummonedThisTurn = 0;
         activePlayer.spellsPlayedThisTurn = 0;
@@ -156,12 +160,26 @@ export class TurnManager {
             for (const player of gs.players) {
                 for (const unit of player.getFieldUnits()) {
                     unit.activatedThisRound = false;
+                    // S025: Charging Rhino — reset double attack flag each round
+                    unit._rhinoUsedDoubleAttack = false;
                 }
                 // Reset landmark once-per-round flags (E002 Scroll Library, W001 Echoing Canyon)
                 if (player.landmarkZone) {
                     player.landmarkZone._scrollLibraryUsed = false;
                     player.landmarkZone._echoUsedThisRound = false;
                 }
+            }
+        }
+
+        // Clear per-turn flags from previous turn
+        for (const p of gs.players) {
+            // E044: Time Delay Rune — clear restriction at new turn start
+            p._timeDelayCardsRemaining = undefined;
+            // E040: Smoke Screen — clear direct attack block
+            p._smokeScreenActive = false;
+            // Clear _destroyedThisTurn flags on graveyard cards
+            for (const c of p.graveyard) {
+                c._destroyedThisTurn = false;
             }
         }
 
@@ -306,7 +324,7 @@ export class TurnManager {
                 for (const p of gs.players) {
                     for (const u of p.getFieldUnits()) {
                         if (u.instanceId !== unit.instanceId) {
-                            this.effectEngine.dealDamageToUnit(u, 100, 'Firebreather Nomad');
+                            await this.effectEngine.dealDamageToUnit(u, 100, 'Firebreather Nomad');
                         }
                     }
                 }

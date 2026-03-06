@@ -12,7 +12,7 @@ echo.
 cd /d "%~dp0"
 
 echo [1/3] Starting game server...
-start "BaR Server" cmd /c "node server/server.mjs"
+start "BaR Server" cmd /c "node --env-file=.env server/server.mjs"
 
 echo [2/3] Starting Vite dev server...
 start "BaR Vite" cmd /c "npx vite --port 3000"

@@ -25,6 +25,8 @@ export const EFFECT_EVENTS = {
     ON_SPELL_PLAY: 'ON_SPELL_PLAY',
     ON_BATTLE_PHASE_START: 'ON_BATTLE_PHASE_START',
     ON_POSITION_CHANGE: 'ON_POSITION_CHANGE',
+    ON_ABILITY_ACTIVATE: 'ON_ABILITY_ACTIVATE',
+    ON_UNIT_EFFECT_RESOLVE: 'ON_UNIT_EFFECT_RESOLVE',
 };
 
 /**
@@ -88,7 +90,9 @@ export class EffectEngine {
             // Check units
             for (const unit of player.getFieldUnits()) {
                 if (unit.silenced) continue;
-                const effects = this.getEffects(unit.cardId);
+                // W035/W004: Use overridden cardId if set (effect copied until end of turn)
+                const effectCardId = unit._temporaryEffectOverride || unit.cardId;
+                const effects = this.getEffects(effectCardId);
                 for (const effect of effects) {
                     if (effect.trigger === event) {
                         if (!effect.condition || effect.condition(this.gameState, { ...context, source: unit, sourcePlayer: player })) {
@@ -114,7 +118,7 @@ export class EffectEngine {
             // NOTE: Skip face-down Traps — they activate only via the response dialog, not automatically
             for (const card of player.getSetCards()) {
                 if (!card || card.faceUp) continue; // Only face-down cards
-                if (card.type === 'Trap') continue; // Traps activate through dialog only
+                if (card.type === 'Trap' && event !== EFFECT_EVENTS.ON_UNIT_EFFECT_RESOLVE) continue; // Traps activate through dialog only (except ON_UNIT_EFFECT_RESOLVE for W050)
                 const effects = this.getEffects(card.cardId);
                 for (const effect of effects) {
                     if (effect.trigger === event) {
@@ -126,12 +130,74 @@ export class EffectEngine {
             }
         }
 
+        // ON_SELF_DESTROY: the destroyed card is already in the graveyard,
+        // so it won't be found among field units above. Check it explicitly.
+        if (event === EFFECT_EVENTS.ON_SELF_DESTROY && context.destroyedCard && !context.destroyedCard.silenced) {
+            const dc = context.destroyedCard;
+            const dcOwner = context.destroyedPlayer;
+            const effects = this.getEffects(dc.cardId);
+            for (const effect of effects) {
+                if (effect.trigger === event) {
+                    if (!effect.condition || effect.condition(this.gameState, { ...context, source: dc, sourcePlayer: dcOwner })) {
+                        matchingEffects.push({ effect, source: dc, sourcePlayer: dcOwner });
+                    }
+                }
+            }
+        }
+
+        // ON_SPELL_PLAY: spell targets may have been removed from the field (e.g. returned to hand).
+        // Check them explicitly so effects like N030 (Stoic Elder) still fire.
+        if (event === EFFECT_EVENTS.ON_SPELL_PLAY && context.spellTargets) {
+            for (const t of context.spellTargets) {
+                const card = t?.card || t; // target may be { card, player } or direct unit ref
+                if (!card?.cardId || card.silenced) continue;
+                // Skip if already found on the field (already checked above)
+                const onField = this.gameState.findCardOnField(card.instanceId);
+                if (onField) continue;
+                const owner = this.gameState.getPlayerById(card.ownerId);
+                if (!owner) continue;
+                const effects = this.getEffects(card.cardId);
+                for (const effect of effects) {
+                    if (effect.trigger === event) {
+                        if (!effect.condition || effect.condition(this.gameState, { ...context, source: card, sourcePlayer: owner })) {
+                            matchingEffects.push({ effect, source: card, sourcePlayer: owner });
+                        }
+                    }
+                }
+            }
+        }
+
         // Sort by priority
         matchingEffects.sort((a, b) => a.effect.priority - b.effect.priority);
 
         // Resolve each effect
         for (const { effect, source, sourcePlayer, isTrap } of matchingEffects) {
-            await this._resolveEffect(effect, { ...context, source, sourcePlayer, isTrap });
+            // Auto-triggered face-down traps: flip face-up, pay mana, resolve, send to graveyard
+            if (isTrap && source && !source.faceUp && source.type === 'Trap') {
+                // Check mana (spell mana allowed)
+                const manaSystem = this.controller?.manaSystem;
+                if (manaSystem && !manaSystem.canAfford(sourcePlayer.id, source.manaCost, true)) {
+                    continue; // Can't afford — skip
+                }
+                if (source.setThisTurn) continue; // Can't activate same turn it was set
+                if (manaSystem) manaSystem.spendMana(sourcePlayer.id, source.manaCost, true);
+
+                // Flip face-up
+                source.faceUp = true;
+                this.gameState.log('TRAP', `${sourcePlayer.name} activates ${source.name}!`);
+                this.gameState.emit('TRAP_ACTIVATED', { card: source, player: sourcePlayer });
+
+                await this._resolveEffect(effect, { ...context, source, sourcePlayer, isTrap });
+
+                // Send to graveyard
+                const loc = this.gameState.findCardOnField(source.instanceId);
+                if (loc) {
+                    loc.player.spellTrapZone[loc.index] = null;
+                    loc.player.graveyard.push(source);
+                }
+            } else {
+                await this._resolveEffect(effect, { ...context, source, sourcePlayer, isTrap });
+            }
         }
     }
 
@@ -223,7 +289,19 @@ export class EffectEngine {
             console.error(`[EffectEngine] Error resolving effect ${effect.id}:`, err);
         }
         this._resolvingSpellOrTrap = wasResolvingSpellOrTrap;
-        return { cancelled: false };
+
+        // Emit ON_UNIT_EFFECT_RESOLVE when a unit's effect resolves (for W050 Power Siphon)
+        const src = context.source;
+        if (src && src.type === 'Unit' && effect.trigger !== EFFECT_EVENTS.ON_UNIT_EFFECT_RESOLVE) {
+            const srcOwner = context.sourcePlayer || this.gameState.getPlayerById(src.ownerId);
+            await this.trigger(EFFECT_EVENTS.ON_UNIT_EFFECT_RESOLVE, {
+                effectUnit: src,
+                effectOwner: srcOwner,
+                resolvedEffect: effect,
+            });
+        }
+
+        return { cancelled: false, target: context.target || null };
     }
 
     /**
@@ -296,6 +374,9 @@ export class EffectEngine {
      */
     clearTempEffects() {
         for (const player of this.gameState.players) {
+            // Clear per-turn player flags
+            player._smokeScreenActive = false;
+
             for (const unit of player.getFieldUnits()) {
                 // Remove temporary modifiers
                 unit.atkModifiers = unit.atkModifiers.filter(m => {
@@ -323,6 +404,19 @@ export class EffectEngine {
                 // Reset per-turn flags
                 unit.canBeTargeted = true;
                 unit.isImmune = false;
+                unit._n029SurvivedThisTurn = false;
+                unit._dealtLPDamage = false;
+                unit._destroyedThisTurn = false;
+                // W035/W004: Clear temporary effect overrides
+                delete unit._temporaryEffectOverride;
+            }
+
+            // W012: Totem Carver — restore original mana costs for cards in hand
+            for (const card of player.hand) {
+                if (card._originalManaCost !== undefined) {
+                    card.manaCost = card._originalManaCost;
+                    delete card._originalManaCost;
+                }
             }
         }
     }
@@ -330,7 +424,7 @@ export class EffectEngine {
     /**
      * Deal damage to a unit
      */
-    dealDamageToUnit(target, amount, source = 'effect') {
+    async dealDamageToUnit(target, amount, source = 'effect') {
         if (target.isImmune) {
             this.gameState.log('EFFECT', `${target.name} is immune to damage!`);
             return 0;
@@ -343,6 +437,27 @@ export class EffectEngine {
             return 0;
         }
 
+        // N024: Colossus of the North — immune to enemy spell/trap damage
+        if (target.cardId === 'N024' && !target.silenced && this._resolvingSpellOrTrap) {
+            this.gameState.log('EFFECT', `${target.name} is immune to Spell/Trap damage!`);
+            return 0;
+        }
+
+        // E020: Mist Walker — immune to spell/trap damage
+        if (target.cardId === 'E020' && !target.silenced && this._resolvingSpellOrTrap) {
+            this.gameState.log('EFFECT', `${target.name} is immune to Spell/Trap damage!`);
+            return 0;
+        }
+
+        // N011: Shield Wall Veteran — reduce all combat damage by 100
+        let reducedAmount = amount;
+        if (target.cardId === 'N011' && !target.silenced) {
+            reducedAmount = Math.max(0, amount - 100);
+            if (reducedAmount < amount) {
+                this.gameState.log('EFFECT', `Shield Wall Veteran reduces damage by ${amount - reducedAmount}!`);
+            }
+        }
+
         // S038: Scorched Earth — +200 bonus damage ONLY from spells/traps
         let bonus = 0;
         if (this._resolvingSpellOrTrap) {
@@ -351,16 +466,23 @@ export class EffectEngine {
                 bonus = 200;
             }
         }
-        const totalDmg = amount + bonus;
+        const totalDmg = reducedAmount + bonus;
 
         target.damageTaken += totalDmg;
         this.gameState.log('DAMAGE', `${target.name} takes ${totalDmg} damage from ${source}${bonus > 0 ? ' (+200 Scorched Earth)' : ''} (${target.damageTaken}/${target.currentDEF} damage taken)`);
         this.gameState.emit('UNIT_DAMAGED', { target, amount: totalDmg, source });
 
+        // Emit ON_DAMAGE_TO_UNIT so effects like N013 (Battle-Scarred Warrior) can react
+        if (totalDmg > 0 && target.damageTaken < target.currentDEF) {
+            this.trigger(EFFECT_EVENTS.ON_DAMAGE_TO_UNIT, { target, amount: totalDmg, source });
+        }
+
         // Check if the unit should be destroyed (DEF reduced to 0)
-        if (target.damageTaken >= target.currentDEF) {
+        // When _suppressAutoDestroy is set (during combat), skip auto-destroy
+        // so that simultaneous damage can be applied before destruction checks.
+        if (target.damageTaken >= target.currentDEF && !this._suppressAutoDestroy) {
             this.gameState.log('DESTROY', `${target.name} is destroyed by ${source}!`);
-            this.destroyUnit(target);
+            await this.destroyUnit(target);
         }
 
         return totalDmg;
@@ -379,6 +501,15 @@ export class EffectEngine {
             return;
         }
 
+        // N047: Hibernation Ward — reduce combat LP damage by 500 (one-time, combat only)
+        let reducedAmount = amount;
+        if (player._hibernationWardActive && this._isCombatDamage) {
+            reducedAmount = Math.max(0, amount - 500);
+            player._hibernationWardActive = false;
+            this.gameState.log('TRAP', `Hibernation Ward reduces LP damage by ${amount - reducedAmount}!`);
+            if (reducedAmount === 0) return;
+        }
+
         // S038: Scorched Earth — +200 bonus damage ONLY from spells/traps
         let bonus = 0;
         if (this._resolvingSpellOrTrap) {
@@ -387,7 +518,7 @@ export class EffectEngine {
                 bonus = 200;
             }
         }
-        const totalDmg = amount + bonus;
+        const totalDmg = reducedAmount + bonus;
 
         player.lp = Math.max(0, player.lp - totalDmg);
         this.gameState.log('LP_DAMAGE', `${player.name} takes ${totalDmg} LP damage${bonus > 0 ? ' (+200 Scorched Earth)' : ''} (${player.lp} LP remaining)`);
@@ -407,8 +538,8 @@ export class EffectEngine {
     healLP(playerId, amount) {
         const player = this.gameState.getPlayerById(playerId);
         if (!player) return;
-        // Cap LP at starting LP (default 3000)
-        const maxLP = this.gameState.startingLP || 3000;
+        // Cap LP at 9999 (can exceed starting LP)
+        const maxLP = 9999;
         const actualHeal = Math.min(amount, maxLP - player.lp);
         if (actualHeal <= 0) {
             this.gameState.log('HEAL', `${player.name} is already at max LP (${player.lp}).`);
@@ -438,11 +569,24 @@ export class EffectEngine {
 
         const { player, zone, index } = location;
 
+        // N029: Resilient Spearman — survive first destruction per turn
+        if (cardInstance.cardId === 'N029' && !cardInstance.silenced && !cardInstance._n029SurvivedThisTurn) {
+            cardInstance._n029SurvivedThisTurn = true;
+            cardInstance.damageTaken = 0;
+            cardInstance.currentDEF = cardInstance.baseDEF;
+            this.gameState.log('EFFECT', `Resilient Spearman survives destruction! DEF reset to ${cardInstance.baseDEF}.`);
+            this.gameState.emit('UNIT_HEALED', { card: cardInstance, amount: cardInstance.baseDEF });
+            return;
+        }
+
         if (zone === 'unit') {
             player.unitZone[index] = null;
         } else if (zone === 'spellTrap') {
             player.spellTrapZone[index] = null;
         }
+
+        // Mark destroyed this turn for W032 (Ancestral Recall)
+        cardInstance._destroyedThisTurn = true;
 
         player.graveyard.push(cardInstance);
 
@@ -452,6 +596,15 @@ export class EffectEngine {
 
         this.gameState.log('DESTROY', `${cardInstance.name} is destroyed and sent to the graveyard.`);
         this.gameState.emit('CARD_DESTROYED', { card: cardInstance, player, zone });
+
+        // S029: Scavenging Hyena — +100/+100 when any unit is destroyed (field-wide check)
+        for (const p of this.gameState.players) {
+            for (const unit of p.getFieldUnits()) {
+                if (unit.cardId === 'S029' && !unit.silenced && unit.instanceId !== cardInstance.instanceId) {
+                    this.applyPermStatMod(unit, 100, 100, 'Scavenging Hyena');
+                }
+            }
+        }
 
         // Trigger ON_SELF_DESTROY
         await this.trigger(EFFECT_EVENTS.ON_SELF_DESTROY, { destroyedCard: cardInstance, destroyedPlayer: player });
@@ -500,6 +653,8 @@ export class EffectEngine {
         } else if (zone === 'spellTrap') {
             player.spellTrapZone[index] = null;
         } else if (zone === 'landmark') {
+            // Clean up any landmark-specific buffs before removing
+            this._cleanupLandmarkBuffs(player, cardInstance);
             player.landmarkZone = null;
         }
 
@@ -590,5 +745,40 @@ export class EffectEngine {
             this.gameState.log('GAME_OVER', alive[0] ? `${alive[0].name} wins!` : 'Draw!');
             this.gameState.emit('GAME_OVER', { winner: alive[0] || null });
         }
+    }
+    /**
+     * Clean up landmark-specific buffs when a landmark leaves the field
+     */
+    _cleanupLandmarkBuffs(player, landmark) {
+        if (!landmark) return;
+
+        // N001: Frostfell Citadel — remove +200 DEF from all units
+        if (landmark.cardId === 'N001') {
+            for (const unit of player.getFieldUnits()) {
+                if (unit._n001Applied) {
+                    this.applyPermStatMod(unit, 0, -200, 'Frostfell Citadel lost');
+                    unit._n001Applied = false;
+                }
+            }
+        }
+    }
+
+    /**
+     * Check if a card is protected by E012 (Temple Guardian)
+     * Returns true if the card belongs to a player who controls E012,
+     * and the card is a landmark or a set spell/trap.
+     */
+    isProtectedByTempleGuardian(card, attackingPlayerId) {
+        const owner = this.gameState.getPlayerById(card.ownerId);
+        if (!owner) return false;
+        // Only protect against enemy effects
+        if (owner.id === attackingPlayerId) return false;
+        // Check if owner has E012 on the field and it's not silenced
+        const hasE012 = owner.getFieldUnits().some(u => u.cardId === 'E012' && !u.silenced);
+        if (!hasE012) return false;
+        // Check if the card is a landmark or a set spell/trap
+        if (card.type === 'Landmark') return true;
+        if ((card.type === 'Spell' || card.type === 'Trap') && !card.faceUp) return true;
+        return false;
     }
 }

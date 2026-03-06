@@ -68,8 +68,8 @@ export class NetworkManager {
     /**
      * Search for an opponent (matchmaking queue)
      */
-    findMatch(playerName) {
-        this.send('FIND_MATCH', { playerName });
+    findMatch(playerName, cosmetics = null) {
+        this.send('FIND_MATCH', { playerName, cosmetics });
     }
 
     /**
@@ -82,15 +82,15 @@ export class NetworkManager {
     /**
      * Create a private room
      */
-    createRoom(playerName) {
-        this.send('CREATE_ROOM', { playerName });
+    createRoom(playerName, cosmetics = null) {
+        this.send('CREATE_ROOM', { playerName, cosmetics });
     }
 
     /**
      * Join an existing private room
      */
-    joinRoom(roomCode, playerName) {
-        this.send('JOIN_ROOM', { roomCode, playerName });
+    joinRoom(roomCode, playerName, cosmetics = null) {
+        this.send('JOIN_ROOM', { roomCode, playerName, cosmetics });
     }
 
     /**
@@ -176,6 +176,31 @@ export class NetworkManager {
 
     respondToPrompt(response) {
         this.send('OPPONENT_RESPONSE', { response });
+    }
+
+    // ─── Duel Mode Actions ─────────────────────────────────────
+
+    /**
+     * Search for a duel opponent (matchmaking queue with deck select)
+     */
+    findDuelMatch(playerName, cosmetics = null) {
+        this.send('FIND_DUEL_MATCH', { playerName, cosmetics });
+    }
+
+    /**
+     * Cancel duel matchmaking search
+     */
+    cancelDuelMatch() {
+        this.send('CANCEL_DUEL_MATCH');
+    }
+
+    /**
+     * Submit region + deck selection after being matched
+     * @param {string} region - Chosen region (e.g. 'Northern')
+     * @param {string[]|null} deckCardIds - Card IDs or null for default deck
+     */
+    duelSelectDeck(region, deckCardIds = null, cosmetics = null) {
+        this.send('DUEL_DECK_SELECTED', { region, deckCardIds, cosmetics });
     }
 
     // ─── War Campaign Actions ────────────────────────────────

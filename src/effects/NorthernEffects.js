@@ -134,12 +134,13 @@ export function register(effectEngine, cardDB) {
     // N010: Guardian Yeti — No effect (vanilla stats)
 
     // N011: Shield Wall Veteran — Reduce all combat damage by 100
+    // Actual damage reduction logic is in EffectEngine.dealDamageToUnit()
     effectEngine.registerCardEffects('N011', [
         createEffect({
             cardId: 'N011',
-            trigger: 'DAMAGE_REDUCTION',
-            description: 'Reduce combat damage by 100',
-            execute: () => { }, // Handled in combat engine
+            trigger: 'PASSIVE',
+            description: 'Reduce combat damage by 100 (handled in EffectEngine)',
+            execute: () => { },
         }),
     ]);
 
@@ -236,12 +237,9 @@ export function register(effectEngine, cardDB) {
             requiresTarget: true,
             targetType: 'enemy_unit',
             targets: (gs, ctx) => gs.getOpponents(ctx.sourcePlayer.id).flatMap(o => o.getFieldUnits()),
-            execute: (gs, ctx, ee) => {
+            execute: async (gs, ctx, ee) => {
                 if (ctx.target) {
-                    ee.dealDamageToUnit(ctx.target, 500, 'Rime-Coated Wurm');
-                    if (ctx.target.damageTaken >= ctx.target.currentDEF) {
-                        ee.destroyUnit(ctx.target);
-                    }
+                    await ee.dealDamageToUnit(ctx.target, 500, 'Rime-Coated Wurm');
                 }
             },
         }),
@@ -299,15 +297,24 @@ export function register(effectEngine, cardDB) {
                 }
             },
         }),
+        // Heal 200 LP on enemy kill (handled in CombatEngine._applyOnDestroyEffects)
+        // This registration is a documentation marker; actual logic is in CombatEngine
+        createEffect({
+            cardId: 'N023',
+            trigger: 'PASSIVE',
+            description: 'Heal 200 LP when destroying enemy by battle (handled in CombatEngine)',
+            execute: () => { },
+        }),
     ]);
 
-    // N024: Colossus of the North — Cannot be affected by enemy Spells or Traps (passive immunity)
+    // N024: Colossus of the North — Cannot be affected by enemy Spells or Traps
+    // Actual immunity logic is in EffectEngine.dealDamageToUnit() and target filtering
     effectEngine.registerCardEffects('N024', [
         createEffect({
             cardId: 'N024',
             trigger: 'PASSIVE',
-            description: 'Cannot be affected by enemy Spells or Traps',
-            execute: () => { }, // Handled by target validation
+            description: 'Cannot be affected by enemy Spells or Traps (handled in EffectEngine)',
+            execute: () => { },
         }),
     ]);
 
@@ -370,12 +377,13 @@ export function register(effectEngine, cardDB) {
     ]);
 
     // N029: Resilient Spearman — First destruction per turn: survive with 500 HP (reset)
+    // Actual prevention logic is in EffectEngine.destroyUnit()
     effectEngine.registerCardEffects('N029', [
         createEffect({
             cardId: 'N029',
-            trigger: 'PREVENT_DESTROY',
-            description: 'First destruction each turn: survive with 500 HP',
-            execute: () => { }, // Handled in destroy logic
+            trigger: 'PASSIVE',
+            description: 'First destruction each turn: survive with 500 HP (handled in EffectEngine)',
+            execute: () => { },
         }),
     ]);
 
@@ -383,14 +391,19 @@ export function register(effectEngine, cardDB) {
     effectEngine.registerCardEffects('N030', [
         createEffect({
             cardId: 'N030',
-            trigger: EFFECT_EVENTS.ON_SPELL_ACTIVATE,
+            trigger: EFFECT_EVENTS.ON_SPELL_PLAY,
             description: 'When a Spell affects this unit, heal 200 LP',
             condition: (gs, ctx) => {
-                // Check if the spell targets this unit
-                return ctx.target?.cardId === 'N030';
+                // Check if any spell target was this unit (by instanceId or cardId)
+                const targets = ctx.spellTargets || [];
+                return targets.some(t =>
+                    (t?.instanceId && t.instanceId === ctx.source?.instanceId) ||
+                    (t?.card?.instanceId && t.card.instanceId === ctx.source?.instanceId)
+                );
             },
             execute: (gs, ctx, ee) => {
-                ee.healLP(ctx.source.ownerId, 200);
+                ee.healLP(ctx.sourcePlayer.id, 200);
+                gs.log('EFFECT', `Stoic Elder heals ${ctx.sourcePlayer.name} for 200 LP!`);
             },
         }),
     ]);
@@ -476,6 +489,7 @@ export function register(effectEngine, cardDB) {
             trigger: 'SELF',
             description: 'Heal a target unit or your LP by 400',
             requiresTarget: true,
+            targetType: 'friendly_unit_or_self_lp',
             targets: (gs, ctx) => {
                 const units = ctx.sourcePlayer.getFieldUnits();
                 return [...units, { type: 'lp', player: ctx.sourcePlayer, name: `${ctx.sourcePlayer.name}'s LP` }];
@@ -499,9 +513,9 @@ export function register(effectEngine, cardDB) {
             requiresTarget: true,
             targetType: 'any_unit',
             targets: (gs) => gs.getAllFieldUnits(),
-            execute: (gs, ctx, ee) => {
+            execute: async (gs, ctx, ee) => {
                 if (ctx.target) {
-                    ee.dealDamageToUnit(ctx.target, 400, 'Sudden Thaw');
+                    await ee.dealDamageToUnit(ctx.target, 400, 'Sudden Thaw');
                 }
             },
         }),
@@ -647,6 +661,7 @@ export function register(effectEngine, cardDB) {
                             const targetPlayer = gs.getPlayerById(targetPlayerId);
                             // Replace existing landmark
                             if (targetPlayer.landmarkZone) {
+                                ee._cleanupLandmarkBuffs(targetPlayer, targetPlayer.landmarkZone);
                                 targetPlayer.graveyard.push(targetPlayer.landmarkZone);
                             }
                             landmark.faceUp = true;

@@ -528,7 +528,7 @@ export class CampaignUI {
                 const targetUnit = data.target?.type === 'unit' ? data.target.card : null;
                 const targetPlayer = data.target?.type === 'direct' ? data.target.player : null;
                 this.gameUI._showAttackAnimation(data.attacker, targetUnit, targetPlayer);
-                await new Promise(r => setTimeout(r, 1200));
+                await new Promise(r => setTimeout(r, 3000));
             } else if (actionType === 'summon') {
                 await new Promise(r => setTimeout(r, 1500));
             } else if (actionType === 'spell') {
@@ -580,6 +580,9 @@ export class CampaignUI {
             // Render the board so the player can watch the AI play
             this.gameUI.render();
 
+            // Show "Opponent's Turn" banner
+            this.gameUI._showTurnBanner("Opponent's Turn", '');
+
             // Brief pause before AI starts acting
             await new Promise(r => setTimeout(r, 600));
 
@@ -591,6 +594,9 @@ export class CampaignUI {
                 this._showPostBattle();
                 return;
             }
+
+            // Show "Your Turn" banner before transition
+            this.gameUI._showTurnBanner('Your Turn', '');
 
             // Show transition to player's turn
             this.gameUI.showTurnTransition();

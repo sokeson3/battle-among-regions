@@ -3,6 +3,8 @@
 // for duel mode (Regional Match)
 // ─────────────────────────────────────────────────────────────
 
+import { MAX_COPIES_PER_CARD } from '../engine/CardDatabase.js';
+
 const STORAGE_KEY = 'bar_custom_decks';
 
 export class DuelDeckBuilderUI {
@@ -25,6 +27,10 @@ export class DuelDeckBuilderUI {
     this.searchQuery = '';
     this.editingIndex = -1;    // index in saved decks when editing, -1 = new
     this.showingSaved = false;
+    this.showAllCards = false;  // false = show only obtained cards
+
+    // Collection data (null = not loaded / guest)
+    this.collection = null;    // Map<cardId, count> or null for guest
   }
 
   // ─── Persistence ──────────────────────────────────────────
@@ -46,7 +52,7 @@ export class DuelDeckBuilderUI {
 
   // ─── Entry Point ──────────────────────────────────────────
 
-  show() {
+  async show() {
     this.deckCards = [];
     this.deckName = '';
     this.deckRegion = 'Northern';
@@ -55,6 +61,23 @@ export class DuelDeckBuilderUI {
     this.searchQuery = '';
     this.editingIndex = -1;
     this.showingSaved = false;
+    this.showAllCards = false;
+
+    // Load collection for logged-in users
+    if (this.authService && this.authService.isLoggedIn) {
+      try {
+        const collArray = await this.authService.getCollection();
+        this.collection = new Map();
+        for (const entry of collArray) {
+          this.collection.set(entry.card_id, entry.count);
+        }
+      } catch {
+        this.collection = null; // fallback to showing all
+      }
+    } else {
+      this.collection = null; // guest — show all
+    }
+
     this._render();
   }
 
@@ -68,8 +91,20 @@ export class DuelDeckBuilderUI {
 
     const allCards = this.cardDb.getAllPlayableCards();
 
+    // Filter to owned cards if collection is loaded (logged-in user)
+    let ownershipMap = null;
+    if (this.collection) {
+      ownershipMap = this.collection;
+    }
+
     // Apply filters
     let pool = allCards;
+
+    // Filter to obtained cards only (unless showAllCards is toggled on)
+    if (ownershipMap && !this.showAllCards) {
+      pool = pool.filter(c => (ownershipMap.get(c.id) || 0) > 0);
+    }
+
     if (this.filterRegion !== 'all') {
       pool = pool.filter(c => c.region === this.filterRegion);
     }
@@ -142,28 +177,28 @@ export class DuelDeckBuilderUI {
                   ${t === 'all' ? 'All Types' : t}
                 </button>
               `).join('')}
+              ${ownershipMap ? `
+                <button class="db-filter-btn db-toggle-all ${this.showAllCards ? 'active' : ''}" id="db-toggle-all">
+                  ${this.showAllCards ? '👁 Owned Only' : '👁 Show All'}
+                </button>
+              ` : ''}
             </div>
 
             <!-- Card grid -->
             <div class="db-card-pool" id="db-card-pool">
               ${pool.map(card => {
       const copies = deckCounts[card.id] || 0;
-      const maxCopies = card.quantity;
+      const ownedCount = ownershipMap ? (ownershipMap.get(card.id) || 0) : MAX_COPIES_PER_CARD;
+      const maxCopies = Math.min(ownedCount, MAX_COPIES_PER_CARD);
       const atMax = copies >= maxCopies;
+      const notOwned = ownershipMap && ownedCount === 0;
       return `
-                  <div class="db-card ${atMax ? 'at-max' : ''} ${this._getRegionColorClass(card.region)}"
-                       data-add-id="${card.id}" title="${card.name}\n${card.description}">
+                  <div class="db-card ${atMax ? 'at-max' : ''} ${notOwned ? 'not-owned' : ''} ${this._getRegionColorClass(card.region)}"
+                       data-add-id="${notOwned ? '' : card.id}" title="${card.name}\n${card.description}${notOwned ? '\n\n🔒 Not in your collection' : ''}">
                     <img class="db-card-img" src="./output-web/${card.id}.webp" alt="${card.name}"
                          onerror="this.style.display='none'" loading="lazy" />
-                    <div class="db-card-overlay">
-                      <div class="db-card-name">${card.name}</div>
-                      <div class="db-card-meta">
-                        <span class="db-card-type">${card.type}</span>
-                        <span class="db-card-mana">💎${card.manaCost}</span>
-                      </div>
-                      ${card.type === 'Unit' ? `<div class="db-card-stats">⚔${card.atk} 🛡${card.hp}</div>` : ''}
-                    </div>
                     ${copies > 0 ? `<div class="db-card-count">${copies}/${maxCopies}</div>` : ''}
+                    ${notOwned ? '<div class="db-card-locked">🔒</div>' : ''}
                   </div>
                 `;
     }).join('')}
@@ -189,18 +224,14 @@ export class DuelDeckBuilderUI {
               </div>
             </div>
 
-            <div class="db-deck-list" id="db-deck-list">
+            <div class="db-deck-grid" id="db-deck-list">
               ${deckGroupList.length === 0 ? '<div class="db-deck-empty">Click cards to add them to your deck</div>' : ''}
               ${deckGroupList.map(({ card, count }) => `
-                <div class="db-deck-entry ${this._getRegionColorClass(card.region)}" data-remove-id="${card.id}">
-                  <img class="db-entry-img" src="./output-web/${card.id}.webp" alt="${card.name}"
+                <div class="db-deck-card ${this._getRegionColorClass(card.region)}" data-remove-id="${card.id}">
+                  <img class="db-card-img" src="./output-web/${card.id}.webp" alt="${card.name}"
                        onerror="this.style.display='none'" loading="lazy" />
-                  <div class="db-entry-info">
-                    <div class="db-entry-name">${card.name}</div>
-                    <div class="db-entry-meta">${card.type} · 💎${card.manaCost}</div>
-                  </div>
-                  <div class="db-entry-count">×${count}</div>
-                  <button class="db-entry-remove" data-remove-id="${card.id}">✕</button>
+                  <div class="db-deck-card-count">×${count}</div>
+                  <button class="db-deck-card-remove" data-remove-id="${card.id}">✕</button>
                 </div>
               `).join('')}
             </div>
@@ -334,6 +365,15 @@ export class DuelDeckBuilderUI {
       this._render();
     };
 
+    // Toggle show all cards
+    const toggleAllBtn = document.getElementById('db-toggle-all');
+    if (toggleAllBtn) {
+      toggleAllBtn.onclick = () => {
+        this.showAllCards = !this.showAllCards;
+        this._render();
+      };
+    }
+
     // Region filters
     this.container.querySelectorAll('[data-filter-region]').forEach(btn => {
       btn.onclick = () => {
@@ -381,10 +421,13 @@ export class DuelDeckBuilderUI {
     this.container.querySelectorAll('[data-add-id]').forEach(el => {
       el.onclick = () => {
         const cardId = el.dataset.addId;
+        if (!cardId) return; // locked card
         const card = this.cardDb.getCard(cardId);
         if (!card) return;
         const count = this.deckCards.filter(id => id === cardId).length;
-        if (count < card.quantity) {
+        const ownedCount = this.collection ? (this.collection.get(cardId) || 0) : MAX_COPIES_PER_CARD;
+        const maxAllowed = Math.min(ownedCount, MAX_COPIES_PER_CARD);
+        if (count < maxAllowed) {
           this.deckCards.push(cardId);
           this._render();
         }
@@ -443,6 +486,16 @@ export class DuelDeckBuilderUI {
       return;
     }
 
+    // Validate: all landmarks must belong to the deck's region
+    const invalidLandmarks = this.deckCards.filter(id => {
+      const card = this.cardDb.getCard(id);
+      return card && card.type === 'Landmark' && card.region !== this.deckRegion;
+    });
+    if (invalidLandmarks.length > 0) {
+      this._showToast(`Landmarks must be from ${this.deckRegion} region only`, 'error');
+      return;
+    }
+
     const decks = this._loadAll();
     const deckData = {
       name: this.deckName.trim(),
@@ -462,65 +515,135 @@ export class DuelDeckBuilderUI {
     this._showToast(`"${deckData.name}" saved!`);
   }
 
-  // ─── Deck Choice Dialog (called from GameUI) ──────────────
+  // ─── Deck Selection Screen (called from GameUI) ─────────────
 
   /**
-   * Show a modal to choose between default deck and saved decks.
-   * @param {string} region - Player's selected region
-   * @param {string} playerName - e.g. "Player 1"
-   * @returns {Promise<string[]|null>} - card IDs array or null for default
+   * Landmark images for each region (used as standard deck covers).
    */
-  showDeckChoice(region, playerName) {
+  static REGION_LANDMARKS = {
+    Northern: { id: 'N001', name: 'The Frostfell Citadel', img: './cosmetics/N001.png' },
+    Eastern: { id: 'E001', name: 'Hidden Monastery', img: './cosmetics/E001.png' },
+    Southern: { id: 'S001', name: 'Arena of Trials', img: './cosmetics/S001.png' },
+    Western: { id: 'W001', name: 'Echoing Canyon', img: './cosmetics/W001.png' },
+  };
+
+  /**
+   * Show a full deck selection screen with 4 standard region decks
+   * and all custom-created decks.
+   * @param {string} playerName - e.g. "Player 1" or "You"
+   * @param {string[]} [excludeRegions=[]] - regions already picked (for local duel)
+   * @returns {Promise<{region: string, deckCardIds: string[]|null}>}
+   */
+  showDeckSelect(playerName, excludeRegions = []) {
     return new Promise(resolve => {
-      const saved = this.getSavedDecksForRegion(region);
+      const allSaved = this._loadAll();
+      const regions = ['Northern', 'Eastern', 'Southern', 'Western'];
 
-      // If no saved decks for this region, use default immediately
-      if (saved.length === 0) {
-        resolve(null);
-        return;
-      }
-
-      // Create a modal overlay
       const overlay = document.createElement('div');
-      overlay.className = 'db-choice-overlay';
+      overlay.className = 'deck-select-overlay';
       overlay.innerHTML = `
-        <div class="db-choice-modal">
-          <h2>${playerName}: Choose Your Deck</h2>
-          <p class="db-choice-region">${region} Region</p>
+        <div class="deck-select-screen">
+          <h2 class="deck-select-title">${this._escapeHtml(playerName)}: Choose Your Deck</h2>
+          <p class="deck-select-subtitle">Pick a standard region deck or one of your custom decks</p>
 
-          <div class="db-choice-options">
-            <div class="db-choice-card db-choice-default" id="db-choice-default">
-              <div class="db-choice-icon">📋</div>
-              <div class="db-choice-label">Default Deck</div>
-              <div class="db-choice-desc">Use the standard ${region} deck</div>
+          <div class="deck-select-section">
+            <h3 class="deck-select-section-label">Standard Decks</h3>
+            <div class="deck-select-grid">
+              ${regions.map(region => {
+        const lm = DuelDeckBuilderUI.REGION_LANDMARKS[region];
+        const disabled = excludeRegions.includes(region);
+        return `
+                  <div class="deck-tile ${this._getRegionColorClass(region)} ${disabled ? 'disabled' : ''}"
+                       data-std-region="${region}">
+                    <div class="deck-tile-img-wrap">
+                      <img class="deck-tile-img" src="${lm.img}" alt="${lm.name}"
+                           onerror="this.style.display='none'" />
+                    </div>
+                    <div class="deck-tile-info">
+                      <span class="deck-tile-name">${region}</span>
+                      <span class="deck-tile-desc">All ${region} cards</span>
+                    </div>
+                  </div>
+                `;
+      }).join('')}
             </div>
-
-            ${saved.map((deck, i) => `
-              <div class="db-choice-card" data-choice-idx="${i}">
-                <div class="db-choice-icon">⚔</div>
-                <div class="db-choice-label">${this._escapeHtml(deck.name)}</div>
-                <div class="db-choice-desc">${deck.cardIds.length} cards</div>
-              </div>
-            `).join('')}
           </div>
+
+          ${allSaved.length > 0 ? `
+            <div class="deck-select-section">
+              <h3 class="deck-select-section-label">Custom Decks</h3>
+              <div class="deck-select-grid">
+                ${allSaved.map((deck, i) => {
+        const firstId = deck.cardIds && deck.cardIds.length > 0 ? deck.cardIds[0] : null;
+        const firstCard = firstId ? this.cardDb.getCard(firstId) : null;
+        const thumbSrc = firstId ? `./output-web/${firstId}.webp` : '';
+        const disabled = excludeRegions.includes(deck.region);
+        return `
+                    <div class="deck-tile deck-tile-custom ${this._getRegionColorClass(deck.region)} ${disabled ? 'disabled' : ''}"
+                         data-custom-idx="${i}">
+                      <div class="deck-tile-img-wrap">
+                        ${thumbSrc
+            ? `<img class="deck-tile-img" src="${thumbSrc}" alt="${firstCard ? firstCard.name : ''}" onerror="this.style.display='none'" />`
+            : `<div class="deck-tile-placeholder">⚔</div>`
+          }
+                      </div>
+                      <div class="deck-tile-info">
+                        <span class="deck-tile-name">${this._escapeHtml(deck.name || 'Unnamed')}</span>
+                        <span class="deck-tile-desc">${deck.region} · ${deck.cardIds.length} cards</span>
+                      </div>
+                    </div>
+                  `;
+      }).join('')}
+              </div>
+            </div>
+          ` : ''}
+
+          <button class="deck-select-back" id="deck-select-back">← Back</button>
         </div>
       `;
 
       document.body.appendChild(overlay);
 
-      // Default deck
-      overlay.querySelector('#db-choice-default').onclick = () => {
-        overlay.remove();
-        resolve(null);
-      };
-
-      // Custom decks
-      overlay.querySelectorAll('[data-choice-idx]').forEach(el => {
+      // Standard deck clicks
+      overlay.querySelectorAll('[data-std-region]:not(.disabled)').forEach(el => {
         el.onclick = () => {
-          const idx = parseInt(el.dataset.choiceIdx);
+          const region = el.dataset.stdRegion;
           overlay.remove();
-          resolve([...saved[idx].cardIds]);
+          resolve({ region, deckCardIds: null });
         };
+      });
+
+      // Custom deck clicks
+      overlay.querySelectorAll('[data-custom-idx]:not(.disabled)').forEach(el => {
+        el.onclick = () => {
+          const idx = parseInt(el.dataset.customIdx);
+          const deck = allSaved[idx];
+          overlay.remove();
+          resolve({ region: deck.region, deckCardIds: [...deck.cardIds] });
+        };
+      });
+
+      // Back button
+      document.getElementById('deck-select-back').onclick = () => {
+        overlay.remove();
+        resolve(null); // null = user cancelled
+      };
+    });
+  }
+
+  /**
+   * Legacy wrapper — still used by some callers.
+   * @deprecated Use showDeckSelect instead
+   */
+  showDeckChoice(region, playerName) {
+    return new Promise(resolve => {
+      const saved = this.getSavedDecksForRegion(region);
+      if (saved.length === 0) { resolve(null); return; }
+
+      // Delegate to showDeckSelect, filter by region
+      this.showDeckSelect(playerName).then(result => {
+        if (!result) { resolve(null); return; }
+        resolve(result.deckCardIds);
       });
     });
   }

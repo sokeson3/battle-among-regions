@@ -143,7 +143,12 @@ export class WarCampaignUI {
       this.net.findWarMatch(name);
       this._showWarSearching();
     };
-    document.getElementById('btn-back').onclick = () => this.showOnline(this.onlineUI);
+    document.getElementById('btn-back').onclick = () => {
+      this._isInWarCampaign = false;
+      this.isOnline = false;
+      this.net.disconnect();
+      this.gameUI.showMenu();
+    };
   }
 
   _showWarSearching() {
@@ -160,7 +165,10 @@ export class WarCampaignUI {
 
     document.getElementById('btn-cancel-search').onclick = () => {
       this.net.cancelWarMatch();
-      this.showOnline(this.onlineUI);
+      this._isInWarCampaign = false;
+      this.isOnline = false;
+      this.net.disconnect();
+      this.gameUI.showMenu();
     };
   }
 

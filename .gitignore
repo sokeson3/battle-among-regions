@@ -12,7 +12,13 @@ dist-electron/
 public/output-web/
 public/Background.webp
 
+# Database files
+server/*.db
+server/*.db-shm
+server/*.db-wal
+
 # Environment files (local overrides)
+.env
 .env.local
 .env.*.local
 

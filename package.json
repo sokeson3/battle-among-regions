@@ -12,7 +12,7 @@
         "test": "vitest run",
         "electron:dev": "npm run build && electron .",
         "electron:build": "npm run build && electron-builder --win",
-        "server": "node server/server.mjs",
+        "server": "node --env-file=.env server/server.mjs",
         "online:dev": "cmd /c \"start cmd /c npm run dev && node server/server.mjs\"",
         "android:sync": "npx cap sync android",
         "android:build": "npx vite build && npx cap sync android && cd android && gradlew.bat assembleDebug"
@@ -27,8 +27,11 @@
         "@capacitor/android": "^6.2.1",
         "@capacitor/cli": "^6.2.1",
         "@capacitor/core": "^6.2.1",
+        "bcryptjs": "^3.0.3",
+        "better-sqlite3": "^12.6.2",
         "express": "^5.2.1",
         "playwright": "^1.58.2",
+        "stripe": "^20.4.0",
         "ws": "^8.19.0"
     },
     "build": {

@@ -56,21 +56,24 @@ export function register(effectEngine, cardDB) {
         }),
     ]);
 
-    // W004: Shifting Chameleon — Once per round: copy another card's effect
+    // W004: Shifting Chameleon — Once per round: copy another unit's effect until end of turn
     effectEngine.registerCardEffects('W004', [
         createEffect({
             cardId: 'W004',
             trigger: 'ACTIVATED',
-            description: 'Copy another card\'s effect',
+            description: 'Copy another unit\'s effect until end of turn',
             requiresTarget: true,
             targets: (gs, ctx) => gs.getAllFieldUnits().filter(u => u.instanceId !== ctx.source.instanceId),
             execute: async (gs, ctx, ee) => {
                 if (ctx.target) {
-                    gs.log('EFFECT', `Shifting Chameleon copies ${ctx.target.name}'s effect!`);
-                    // Copy the source's registered effects and execute them
+                    // Set override so this unit uses the target's effects for all triggers
+                    ctx.source._temporaryEffectOverride = ctx.target.cardId;
+                    gs.log('EFFECT', `Shifting Chameleon adopts ${ctx.target.name}'s effects until end of turn!`);
+
+                    // Also immediately fire ON_SUMMON effects from the copied card
                     const effects = ee.getEffects(ctx.target.cardId);
                     for (const eff of effects) {
-                        if (eff.trigger === EFFECT_EVENTS.ON_SUMMON || eff.trigger === 'ACTIVATED') {
+                        if (eff.trigger === EFFECT_EVENTS.ON_SUMMON) {
                             await ee._resolveEffect(eff, { ...ctx, source: ctx.source });
                         }
                     }
@@ -94,20 +97,20 @@ export function register(effectEngine, cardDB) {
         }),
     ]);
 
-    // W007: Zephyr Spirit — When Summoned: Return another friendly unit to hand, gain 2 mana
+    // W007: Zephyr Spirit — When Summoned: Return another friendly unit to hand. If you do, gain 1 mana
     effectEngine.registerCardEffects('W007', [
         createEffect({
             cardId: 'W007',
             trigger: EFFECT_EVENTS.ON_SUMMON,
-            description: 'Return a friendly unit, gain 2 mana',
+            description: 'Return a friendly unit, gain 1 mana',
             requiresTarget: true,
             targetType: 'friendly_unit',
             targets: (gs, ctx) => ctx.sourcePlayer.getFieldUnits().filter(u => u.instanceId !== ctx.source.instanceId),
             execute: (gs, ctx, ee) => {
                 if (ctx.target) {
                     ee.returnToHand(ctx.target);
-                    ctx.sourcePlayer.primaryMana += 2;
-                    gs.log('EFFECT', `${ctx.sourcePlayer.name} gains 2 bonus mana!`);
+                    ctx.sourcePlayer.primaryMana += 1;
+                    gs.log('EFFECT', `${ctx.sourcePlayer.name} gains 1 bonus mana!`);
                 }
             },
         }),
@@ -143,6 +146,17 @@ export function register(effectEngine, cardDB) {
                 gs.log('EFFECT', 'Resourceful Scavenger: +1 mana!');
             },
         }),
+        createEffect({
+            cardId: 'W009',
+            trigger: EFFECT_EVENTS.ON_UNIT_RETURNED,
+            description: 'Gain 1 mana when friendly unit returned to hand',
+            condition: (gs, ctx) => ctx.ownerId === ctx.source?.ownerId,
+            execute: (gs, ctx, ee) => {
+                const owner = gs.getPlayerById(ctx.source.ownerId);
+                owner.primaryMana += 1;
+                gs.log('EFFECT', 'Resourceful Scavenger: +1 mana (unit returned)!');
+            },
+        }),
     ]);
 
     // W010: Illusion Weaver — When Summoned: Silence an enemy unit
@@ -162,17 +176,21 @@ export function register(effectEngine, cardDB) {
 
     // W011: Canyon Ambusher — Rush (keyword only)
 
-    // W012: Totem Carver — When unit returned to hand from the field: reduce cost by 1, gain 1 mana
+    // W012: Totem Carver — When unit returned to hand from the field: reduce cost by 1 this turn, gain 1 mana
     effectEngine.registerCardEffects('W012', [
         createEffect({
             cardId: 'W012',
             trigger: EFFECT_EVENTS.ON_UNIT_RETURNED,
-            description: 'Reduce returned unit cost by 1, gain 1 mana',
+            description: 'Reduce returned unit cost by 1 this turn, gain 1 mana',
             condition: (gs, ctx) => ctx.ownerId === ctx.source?.ownerId,
             execute: (gs, ctx, ee) => {
                 if (ctx.returnedCard) {
+                    // Store original cost for restoration at end of turn
+                    if (ctx.returnedCard._originalManaCost === undefined) {
+                        ctx.returnedCard._originalManaCost = ctx.returnedCard.manaCost;
+                    }
                     ctx.returnedCard.manaCost = Math.max(0, ctx.returnedCard.manaCost - 1);
-                    gs.log('EFFECT', `${ctx.returnedCard.name} cost reduced to ${ctx.returnedCard.manaCost}!`);
+                    gs.log('EFFECT', `${ctx.returnedCard.name} cost reduced to ${ctx.returnedCard.manaCost} this turn!`);
                 }
                 const owner = gs.getPlayerById(ctx.source.ownerId);
                 owner.primaryMana += 1;
@@ -260,15 +278,15 @@ export function register(effectEngine, cardDB) {
         }),
     ]);
 
-    // W018: Grand Shaman — Return friendly (gain 3 mana) or return enemy
+    // W018: Grand Shaman — Return friendly (gain 2 mana) or return enemy
     effectEngine.registerCardEffects('W018', [
         createEffect({
             cardId: 'W018',
             trigger: EFFECT_EVENTS.ON_SUMMON,
-            description: 'Return a friendly unit (+3 mana) or an enemy unit',
+            description: 'Return a friendly unit (+2 mana) or an enemy unit',
             execute: async (gs, ctx, ee) => {
                 const choice = await ee.requestChoice(
-                    [{ label: 'Return friendly unit (+3 mana)', value: 'friendly' }, { label: 'Return enemy unit', value: 'enemy' }],
+                    [{ label: 'Return friendly unit (+2 mana)', value: 'friendly' }, { label: 'Return enemy unit', value: 'enemy' }],
                     'Grand Shaman: Choose mode'
                 );
                 if (choice?.value === 'friendly') {
@@ -277,8 +295,8 @@ export function register(effectEngine, cardDB) {
                         const target = await ee.requestTarget(targets, 'Choose a friendly unit to return');
                         if (target) {
                             ee.returnToHand(target);
-                            ctx.sourcePlayer.primaryMana += 3;
-                            gs.log('EFFECT', `${ctx.sourcePlayer.name} gains 3 bonus mana!`);
+                            ctx.sourcePlayer.primaryMana += 2;
+                            gs.log('EFFECT', `${ctx.sourcePlayer.name} gains 2 bonus mana!`);
                         }
                     }
                 } else {
@@ -302,6 +320,18 @@ export function register(effectEngine, cardDB) {
                 ctx.source.maxAttacks = 2;
             },
         }),
+        // Re-ensure maxAttacks persists (in case of silence/un-silence)
+        createEffect({
+            cardId: 'W019',
+            trigger: EFFECT_EVENTS.ON_TURN_START,
+            description: 'Maintain double attack capability',
+            condition: (gs, ctx) => ctx.activePlayer.id === ctx.source?.ownerId && !ctx.source?.silenced,
+            execute: (gs, ctx, ee) => {
+                if (ctx.source.maxAttacks < 2) {
+                    ctx.source.maxAttacks = 2;
+                }
+            },
+        }),
     ]);
 
     // W020: Guardian Golem — Taunt (handled in CombatEngine.canTarget)
@@ -320,23 +350,27 @@ export function register(effectEngine, cardDB) {
                         `Choose target ${i + 1} for 300 damage`
                     );
                     if (target) {
-                        ee.dealDamageToUnit(target, 300, 'Roaming Thunderbeast');
-                        if (target.damageTaken >= target.currentDEF) ee.destroyUnit(target);
+                        await ee.dealDamageToUnit(target, 300, 'Roaming Thunderbeast');
                     }
                 }
             },
         }),
     ]);
 
-    // W022: Sky Sovereign Eagle — When destroys enemy and survives: search Western unit
+    // W022: Sky Sovereign Eagle — When destroys enemy and survives IN BATTLE: search Western unit
     effectEngine.registerCardEffects('W022', [
         createEffect({
             cardId: 'W022',
             trigger: EFFECT_EVENTS.ON_DESTROY,
-            description: 'Search for a Western unit when destroying enemy',
+            description: 'Search for a Western unit when destroying enemy by battle',
             condition: (gs, ctx) => {
-                // Check if the Eagle was the one that destroyed the enemy
-                return ctx.destroyedCard?.ownerId !== ctx.source?.ownerId;
+                // Only trigger on battle kills by this unit
+                if (ctx.destroyedCard?.ownerId === ctx.source?.ownerId) return false;
+                // Must be a battle kill (tracked via _lastBattleKiller on destroyed card)
+                if (ctx.destroyedCard?._lastBattleKiller !== ctx.source?.instanceId) return false;
+                // Eagle must still be on the field (survived combat)
+                const loc = gs.findCardOnField(ctx.source?.instanceId);
+                return !!loc;
             },
             execute: async (gs, ctx, ee) => {
                 const owner = gs.getPlayerById(ctx.source.ownerId);
@@ -406,13 +440,16 @@ export function register(effectEngine, cardDB) {
         }),
     ]);
 
-    // W025: Mimic Chest — When Summoned: if 5+ total mana, draw a card
+    // W025: Mimic Chest — When Summoned: if 5+ total mana capacity this turn, draw a card
     effectEngine.registerCardEffects('W025', [
         createEffect({
             cardId: 'W025',
             trigger: EFFECT_EVENTS.ON_SUMMON,
-            description: 'Draw a card if you have 5+ total mana',
-            condition: (gs, ctx) => ctx.sourcePlayer.getTotalMana() >= 5,
+            description: 'Draw a card if you have 5+ total mana capacity',
+            condition: (gs, ctx) => {
+                // Check actual total mana capacity (primary + spell mana), not round counter
+                return ctx.sourcePlayer.getTotalMana() >= 5;
+            },
             execute: (gs, ctx, ee) => {
                 ee.drawCards(ctx.sourcePlayer.id, 1);
             },
@@ -451,14 +488,41 @@ export function register(effectEngine, cardDB) {
     ]);
 
     // W028: Trickster Coyote — Rush. When deals LP damage: return to hand
+    // Uses flag-based pattern (like S023 Ancient Phoenix) so it works even if unit dies in combat
     effectEngine.registerCardEffects('W028', [
         createEffect({
             cardId: 'W028',
             trigger: EFFECT_EVENTS.ON_DAMAGE_TO_LP,
-            description: 'Return to hand after dealing LP damage',
+            description: 'Track LP damage and return to hand if still alive',
             condition: (gs, ctx) => ctx.attacker?.cardId === 'W028' && ctx.isCombat,
             execute: (gs, ctx, ee) => {
-                if (ctx.attacker) ee.returnToHand(ctx.attacker);
+                if (ctx.attacker) {
+                    // If still on the field, return to hand immediately
+                    const loc = gs.findCardOnField(ctx.attacker.instanceId);
+                    if (loc) ee.returnToHand(ctx.attacker);
+                    // Note: _dealtLPDamage flag is already set by CombatEngine
+                    // If destroyed in the same combat, ON_SELF_DESTROY handler below will recover it
+                }
+            },
+        }),
+        // If destroyed in the same combat where it dealt LP damage, recover from graveyard
+        createEffect({
+            cardId: 'W028',
+            trigger: EFFECT_EVENTS.ON_SELF_DESTROY,
+            description: 'Return to hand from graveyard if dealt LP damage',
+            condition: (gs, ctx) => ctx.destroyedCard?.cardId === 'W028' && ctx.destroyedCard._dealtLPDamage,
+            execute: (gs, ctx, ee) => {
+                const owner = ctx.destroyedPlayer;
+                const idx = owner.graveyard.findIndex(c => c.instanceId === ctx.destroyedCard.instanceId);
+                if (idx >= 0) {
+                    const card = owner.graveyard.splice(idx, 1)[0];
+                    card.damageTaken = 0;
+                    card.currentATK = card.baseATK;
+                    card.currentDEF = card.baseDEF;
+                    card._dealtLPDamage = false;
+                    owner.hand.push(card);
+                    gs.log('EFFECT', 'Trickster Coyote returns to hand after dealing LP damage!');
+                }
             },
         }),
     ]);
@@ -472,18 +536,27 @@ export function register(effectEngine, cardDB) {
             execute: async (gs, ctx, ee) => {
                 const opponents = gs.getOpponents(ctx.sourcePlayer.id).filter(o => o.landmarkZone);
                 if (opponents.length === 0) return;
+                // E012: Temple Guardian — skip opponents whose landmarks are protected
+                const validOpponents = opponents.filter(o => !ee.isProtectedByTempleGuardian(o.landmarkZone, ctx.sourcePlayer.id));
+                if (validOpponents.length === 0) {
+                    gs.log('EFFECT', `Burrowing Worm: Opponent's Landmark is protected by Temple Guardian!`);
+                    return;
+                }
                 const choice = await ee.requestChoice(
                     [{ label: 'Destroy enemy Landmark', value: 'destroy' }, { label: 'Switch Landmarks', value: 'switch' }],
                     'Burrowing Worm: Choose action'
                 );
                 if (choice?.value === 'destroy') {
-                    const target = opponents[0];
+                    const target = validOpponents[0];
+                    ee._cleanupLandmarkBuffs(target, target.landmarkZone);
                     target.graveyard.push(target.landmarkZone);
                     target.landmarkZone = null;
                     gs.log('EFFECT', 'Enemy Landmark destroyed!');
                 } else if (choice?.value === 'switch') {
-                    const target = opponents[0];
+                    const target = validOpponents[0];
                     const temp = ctx.sourcePlayer.landmarkZone;
+                    ee._cleanupLandmarkBuffs(ctx.sourcePlayer, ctx.sourcePlayer.landmarkZone);
+                    ee._cleanupLandmarkBuffs(target, target.landmarkZone);
                     ctx.sourcePlayer.landmarkZone = target.landmarkZone;
                     target.landmarkZone = temp;
                     gs.log('EFFECT', 'Landmarks switched!');
@@ -570,21 +643,25 @@ export function register(effectEngine, cardDB) {
             trigger: 'SELF',
             description: 'Return a unit destroyed this turn to hand',
             execute: async (gs, ctx, ee) => {
-                const eligible = ctx.sourcePlayer.graveyard.filter(c => c.type === 'Unit');
+                // Filter to only units destroyed this turn
+                const eligible = ctx.sourcePlayer.graveyard.filter(c => c.type === 'Unit' && c._destroyedThisTurn);
                 if (eligible.length > 0) {
                     const chosen = await ee.requestChoice(
                         eligible.map(c => ({ label: c.name, value: c.instanceId, cardId: c.cardId })),
-                        'Choose a unit to return to hand'
+                        'Choose a unit destroyed this turn to return to hand'
                     );
                     if (chosen) {
                         const idx = ctx.sourcePlayer.graveyard.findIndex(c => c.instanceId === chosen.value);
                         if (idx >= 0) {
                             const card = ctx.sourcePlayer.graveyard.splice(idx, 1)[0];
                             card.damageTaken = 0;
+                            card._destroyedThisTurn = false;
                             ctx.sourcePlayer.hand.push(card);
                             gs.log('EFFECT', `${card.name} returned to hand!`);
                         }
                     }
+                } else {
+                    gs.log('EFFECT', 'No units were destroyed this turn.');
                 }
             },
         }),
@@ -627,12 +704,12 @@ export function register(effectEngine, cardDB) {
         }),
     ]);
 
-    // W035: Effect Mimicry — Copy another unit's effect text
+    // W035: Effect Mimicry — Copy a unit's effect to a friendly unit until end of turn
     effectEngine.registerCardEffects('W035', [
         createEffect({
             cardId: 'W035',
             trigger: 'SELF',
-            description: 'Copy a unit\'s effect to a friendly unit',
+            description: 'Copy a unit\'s effect to a friendly unit until end of turn',
             execute: async (gs, ctx, ee) => {
                 // Choose a friendly unit to receive the copied effect
                 const friendlies = ctx.sourcePlayer.getFieldUnits();
@@ -652,11 +729,14 @@ export function register(effectEngine, cardDB) {
                 const source = await ee.requestTarget(allUnits, 'Choose a unit to copy effects from');
                 if (!source) return;
 
-                // Copy the source's effects to execute on the receiver
+                // Set override so the receiver uses the source's effects for all triggers
+                receiver._temporaryEffectOverride = source.cardId;
+                gs.log('EFFECT', `${receiver.name} adopts ${source.name}'s effects until end of turn!`);
+
+                // Also immediately fire ON_SUMMON effects from the copied card
                 const sourceEffects = ee.getEffects(source.cardId);
-                gs.log('EFFECT', `${receiver.name} copies ${source.name}'s printed effects until end of turn!`);
                 for (const eff of sourceEffects) {
-                    if (eff.trigger === EFFECT_EVENTS.ON_SUMMON || eff.trigger === 'ACTIVATED') {
+                    if (eff.trigger === EFFECT_EVENTS.ON_SUMMON) {
                         await ee._resolveEffect(eff, { ...ctx, source: receiver, sourcePlayer: ctx.sourcePlayer });
                     }
                 }
@@ -673,6 +753,8 @@ export function register(effectEngine, cardDB) {
             execute: async (gs, ctx, ee) => {
                 const withLandmarks = gs.players.filter(p => p.landmarkZone);
                 if (withLandmarks.length >= 2) {
+                    ee._cleanupLandmarkBuffs(withLandmarks[0], withLandmarks[0].landmarkZone);
+                    ee._cleanupLandmarkBuffs(withLandmarks[1], withLandmarks[1].landmarkZone);
                     const temp = withLandmarks[0].landmarkZone;
                     withLandmarks[0].landmarkZone = withLandmarks[1].landmarkZone;
                     withLandmarks[1].landmarkZone = temp;
@@ -847,34 +929,31 @@ export function register(effectEngine, cardDB) {
         }),
     ]);
 
-    // W045: Effect Dampener — CSV: "Negate unit ability". Implementation: silence summoned unit.
-    // Note: triggers on opponent summon since there is no dedicated ability-activation response prompt.
+    // W045: Effect Dampener — "When your opponent activates a unit's ability: Negate that ability"
     effectEngine.registerCardEffects('W045', [
         createEffect({
             cardId: 'W045',
-            trigger: EFFECT_EVENTS.ON_OPPONENT_SUMMON,
-            description: "Negate opponent's unit ability",
-            condition: (gs, ctx) => {
-                return ctx.summoningPlayer?.id !== ctx.sourcePlayer.id &&
-                    ctx.summonedCard?.effectTriggers?.length > 0;
-            },
+            trigger: EFFECT_EVENTS.ON_ABILITY_ACTIVATE,
+            description: "Negate opponent's activated ability",
+            condition: (gs, ctx) => ctx.caster?.id !== ctx.sourcePlayer.id && ctx.abilityCard?.type === 'Unit',
             execute: (gs, ctx, ee) => {
-                if (ctx.summonedCard) {
-                    ee.silenceUnit(ctx.summonedCard);
-                    gs.log('TRAP', `Effect Dampener negates ${ctx.summonedCard.name}'s abilities!`);
-                }
+                gs._abilityNegate = true;
+                gs.log('TRAP', `Effect Dampener negates ${ctx.abilityCard?.name || 'unit'}'s activated ability!`);
             },
         }),
     ]);
 
-    // W046: Decoy Totem — Redirect targeting to this card, then destroy
+    // W046: Decoy Totem — Negate enemy spell and destroy this card
     effectEngine.registerCardEffects('W046', [
         createEffect({
             cardId: 'W046',
-            trigger: EFFECT_EVENTS.ON_FRIENDLY_TARGETED,
-            description: 'Redirect effect to this card, then destroy it',
+            trigger: EFFECT_EVENTS.ON_SPELL_ACTIVATE,
+            description: 'Negate enemy spell targeting your cards; destroy this card',
+            condition: (gs, ctx) => ctx.caster && ctx.caster.id !== ctx.sourcePlayer.id,
             execute: (gs, ctx, ee) => {
-                gs.log('TRAP', 'Decoy Totem absorbs the targeting!');
+                // Negate the incoming spell
+                gs._chainNegate = true;
+                gs.log('TRAP', 'Decoy Totem absorbs the targeting and negates the spell!');
                 // Find and destroy the Decoy Totem
                 const loc = gs.findCardOnField(ctx.source.instanceId);
                 if (loc) {
@@ -944,17 +1023,17 @@ export function register(effectEngine, cardDB) {
         }),
     ]);
 
-    // W050: Power Siphon — CSV: "When opponent activates ability". Implementation: triggers on summon.
-    // Note: triggers on opponent summon since there is no dedicated ability-activation response prompt.
+    // W050: Power Siphon — "When an opponent's unit activates or triggers an effect"
+    // Friendly unit gains ATK/DEF equal to the cost of that unit × 100
     effectEngine.registerCardEffects('W050', [
         createEffect({
             cardId: 'W050',
-            trigger: EFFECT_EVENTS.ON_OPPONENT_SUMMON,
-            description: 'Friendly unit gains ATK/DEF equal to summoned unit cost x100',
-            condition: (gs, ctx) => ctx.summoningPlayer?.id !== ctx.sourcePlayer.id,
+            trigger: EFFECT_EVENTS.ON_UNIT_EFFECT_RESOLVE,
+            description: 'Friendly unit gains ATK/DEF equal to unit cost x100',
+            condition: (gs, ctx) => ctx.effectOwner?.id !== ctx.sourcePlayer.id && ctx.effectUnit?.type === 'Unit',
             execute: async (gs, ctx, ee) => {
-                if (ctx.summonedCard) {
-                    const bonus = ctx.summonedCard.manaCost * 100;
+                if (ctx.effectUnit) {
+                    const bonus = ctx.effectUnit.manaCost * 100;
                     const friendlies = ctx.sourcePlayer.getFieldUnits();
                     if (friendlies.length > 0) {
                         const target = await ee.requestTarget(friendlies, 'Choose a friendly unit to power up');

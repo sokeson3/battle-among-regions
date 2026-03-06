@@ -6,6 +6,7 @@
 import { NetworkManager } from '../online/NetworkManager.js';
 import * as SharedUI from './SharedUI.js';
 import * as MatchHistory from '../online/MatchHistory.js';
+import { DuelDeckBuilderUI } from './DuelDeckBuilderUI.js';
 
 export class OnlineGameUI {
     /**
@@ -52,6 +53,10 @@ export class OnlineGameUI {
                 this.warUI.net = this.net;
                 this.warUI.wireWarEvents();
             }
+            // Authenticate WebSocket if logged in
+            if (this.authService && this.authService.isLoggedIn) {
+                this.authService.authenticateWebSocket(this.net);
+            }
             return true;
         } catch (err) {
             console.error('Connection failed:', err);
@@ -70,12 +75,19 @@ export class OnlineGameUI {
         this.net.on('MATCH_FOUND', (msg) => {
             this._updateJoiningStatus('✅ Match found! Loading game...');
             this._showMatchFound(msg.yourRegion, msg.opponentName, msg.opponentRegion);
+            // Store opponent cosmetics for this match
+            this._opponentCosmetics = msg.opponentCosmetics || null;
             // Hand off in-game rendering to GameUI
-            this.gameUI.startOnlineGame(this.net, this.myPlayerId);
+            this.gameUI.startOnlineGame(this.net, this.myPlayerId, this._opponentCosmetics);
+        });
+
+        this.net.on('DUEL_MATCH_FOUND', (msg) => {
+            this._opponentCosmetics = msg.opponentCosmetics || null;
+            this._showDuelDeckSelect(msg.opponentName);
         });
 
         this.net.on('MATCH_CANCELLED', () => {
-            this.showLobby();
+            this._goBackToLobby();
         });
 
         this.net.on('ROOM_CREATED', (msg) => {
@@ -90,6 +102,14 @@ export class OnlineGameUI {
             if (joiningEl) {
                 this._showJoinRoom();
             }
+        });
+
+        // Card reward notification after ranked games
+        this.net.on('CARDS_UNLOCKED', (msg) => {
+            const cards = msg.cards || [];
+            if (cards.length === 0) return;
+            const source = msg.source === 'warCampaign' ? 'War Campaign' : 'Duel';
+            this._showCardRewardPopup(cards, source);
         });
     }
 
@@ -127,7 +147,34 @@ export class OnlineGameUI {
         };
     }
 
-    _showQuickMatch() {
+    showCasualLobby() {
+        this.app.innerHTML = `
+            <div class="main-menu online-lobby">
+                <h1 class="menu-title">🎲 Casual Play</h1>
+                <p class="menu-subtitle">Play casual matches against other players</p>
+                <div class="menu-buttons">
+                    <button class="menu-btn primary online-glow" id="btn-quick-match">⚡ Quick Match</button>
+                    <button class="menu-btn" id="btn-private-match">🔒 Private Match</button>
+                    <button class="menu-btn" id="btn-match-history">📊 Match History</button>
+                    <button class="menu-btn" id="btn-back">← Back to Menu</button>
+                </div>
+                <div class="online-status" id="connection-status">
+                    <span class="status-dot connected"></span> Connected to server
+                </div>
+            </div>
+        `;
+
+        document.getElementById('btn-quick-match').onclick = () => this._showQuickMatch(true);
+        document.getElementById('btn-private-match').onclick = () => this._showPrivateMatch(true);
+        document.getElementById('btn-match-history').onclick = () => this._showMatchHistory(true);
+        document.getElementById('btn-back').onclick = () => {
+            this.net.disconnect();
+            this.gameUI.showMenu();
+        };
+    }
+
+    _showQuickMatch(casualMode = false) {
+        this._casualMode = casualMode;
         this.app.innerHTML = `
             <div class="main-menu online-lobby">
                 <h1 class="menu-title">⚡ Quick Match</h1>
@@ -142,11 +189,11 @@ export class OnlineGameUI {
 
         document.getElementById('btn-search').onclick = () => {
             const name = document.getElementById('player-name').value.trim() || 'Player';
-            this.net.findMatch(name);
+            this.net.findMatch(name, this.gameUI.cosmetics.getEquippedSnapshot());
             this._showSearching();
         };
 
-        document.getElementById('btn-lobby-back').onclick = () => this.showLobby();
+        document.getElementById('btn-lobby-back').onclick = () => this._goBackToLobby();
     }
 
     _showSearching() {
@@ -165,7 +212,7 @@ export class OnlineGameUI {
 
         document.getElementById('btn-cancel-search').onclick = () => {
             this.net.cancelMatch();
-            this.showLobby();
+            this._goBackToLobby();
         };
     }
 
@@ -198,7 +245,8 @@ export class OnlineGameUI {
         `;
     }
 
-    _showPrivateMatch() {
+    _showPrivateMatch(casualMode = false) {
+        if (casualMode) this._casualMode = true;
         this.app.innerHTML = `
             <div class="main-menu online-lobby">
                 <h1 class="menu-title">🔒 Private Match</h1>
@@ -213,7 +261,7 @@ export class OnlineGameUI {
 
         document.getElementById('btn-create').onclick = () => this._showCreateRoom();
         document.getElementById('btn-join').onclick = () => this._showJoinRoom();
-        document.getElementById('btn-lobby-back').onclick = () => this.showLobby();
+        document.getElementById('btn-lobby-back').onclick = () => this._goBackToLobby();
     }
 
     _showCreateRoom() {
@@ -231,10 +279,10 @@ export class OnlineGameUI {
 
         document.getElementById('btn-create-go').onclick = () => {
             const name = document.getElementById('player-name').value.trim() || 'Player 1';
-            this.net.createRoom(name);
+            this.net.createRoom(name, this.gameUI.cosmetics.getEquippedSnapshot());
         };
 
-        document.getElementById('btn-lobby-back').onclick = () => this._showPrivateMatch();
+        document.getElementById('btn-lobby-back').onclick = () => this._goBackToLobby();
     }
 
     _showJoinRoom() {
@@ -260,11 +308,11 @@ export class OnlineGameUI {
                 return;
             }
 
-            this.net.joinRoom(code, name);
+            this.net.joinRoom(code, name, this.gameUI.cosmetics.getEquippedSnapshot());
             this._showJoining(code);
         };
 
-        document.getElementById('btn-lobby-back').onclick = () => this._showPrivateMatch();
+        document.getElementById('btn-lobby-back').onclick = () => this._goBackToLobby();
     }
 
     _showJoining(roomCode) {
@@ -333,7 +381,120 @@ export class OnlineGameUI {
         };
     }
 
+    // ─── Duel Mode (with deck selection) ────────────────────
+
+    showDuelLobby() {
+        this.app.innerHTML = `
+            <div class="main-menu online-lobby">
+                <h1 class="menu-title">⚔ Ranked Duel</h1>
+                <p class="menu-subtitle">Choose your region & deck, then battle</p>
+                <div class="menu-buttons">
+                    <button class="menu-btn primary online-glow" id="btn-duel-quick">⚡ Quick Match</button>
+                    <button class="menu-btn" id="btn-duel-back">← Back to Menu</button>
+                </div>
+                <div class="online-status" id="connection-status">
+                    <span class="status-dot connected"></span> Connected to server
+                </div>
+            </div>
+        `;
+
+        document.getElementById('btn-duel-quick').onclick = () => this._showDuelQuickMatch();
+        document.getElementById('btn-duel-back').onclick = () => {
+            this.net.disconnect();
+            this.gameUI.showMenu();
+        };
+    }
+
+    _showDuelQuickMatch() {
+        this.app.innerHTML = `
+            <div class="main-menu online-lobby">
+                <h1 class="menu-title">⚡ Ranked Duel</h1>
+                <p class="menu-subtitle">Enter your name and find an opponent</p>
+                <div class="online-form">
+                    <input type="text" class="online-input" id="player-name" placeholder="Your Name" maxlength="20" value="Player" />
+                    <button class="menu-btn primary" id="btn-search">🔍 Find Opponent</button>
+                    <button class="menu-btn" id="btn-lobby-back">← Back</button>
+                </div>
+            </div>
+        `;
+
+        document.getElementById('btn-search').onclick = () => {
+            const name = document.getElementById('player-name').value.trim() || 'Player';
+            this.net.findDuelMatch(name, this.gameUI.cosmetics.getEquippedSnapshot());
+            this._showDuelSearching();
+        };
+
+        document.getElementById('btn-lobby-back').onclick = () => {
+            this.net.disconnect();
+            this.gameUI.showMenu();
+        };
+    }
+
+    _showDuelSearching() {
+        this.app.innerHTML = `
+            <div class="main-menu online-lobby">
+                <h1 class="menu-title">⚡ Ranked Duel</h1>
+                <div class="waiting-animation">
+                    <div class="waiting-dots">
+                        <span></span><span></span><span></span>
+                    </div>
+                    <p>Searching for an opponent...</p>
+                </div>
+                <button class="menu-btn" id="btn-cancel-search">✕ Cancel</button>
+            </div>
+        `;
+
+        document.getElementById('btn-cancel-search').onclick = () => {
+            this.net.cancelDuelMatch();
+            this.net.disconnect();
+            this.gameUI.showMenu();
+        };
+    }
+
+    _showDuelDeckSelect(opponentName) {
+        const deckBuilder = this.gameUI.deckBuilderUI;
+        if (!deckBuilder) return;
+
+        deckBuilder.showDeckSelect(`You (vs ${opponentName})`).then(result => {
+            if (!result) {
+                // User pressed back — cancel
+                this.net.cancelDuelMatch();
+                this.net.disconnect();
+                this.gameUI.showMenu();
+                return;
+            }
+
+            const { region, deckCardIds } = result;
+            const deckName = deckCardIds ? 'Custom Deck' : `Default ${region}`;
+
+            this.net.duelSelectDeck(region, deckCardIds, this.gameUI.cosmetics.getEquippedSnapshot());
+            this.app.innerHTML = `
+                <div class="main-menu online-lobby">
+                    <h1 class="menu-title" style="color:var(--accent-gold)">⚔ Deck Submitted</h1>
+                    <p class="menu-subtitle">${region} — ${deckName}</p>
+                    <div class="waiting-animation">
+                        <div class="waiting-dots">
+                            <span></span><span></span><span></span>
+                        </div>
+                        <p>Waiting for opponent to select their deck...</p>
+                    </div>
+                </div>
+            `;
+        });
+    }
+
     // ─── Utility ─────────────────────────────────────────────
+
+    /** Navigate back: to main menu if in casual mode, otherwise to the generic online lobby */
+    _goBackToLobby() {
+        if (this._casualMode) {
+            this._casualMode = false;
+            this.net.disconnect();
+            this.gameUI.showMenu();
+        } else {
+            this.showLobby();
+        }
+    }
 
     _getRegionClass(region) {
         const map = { Northern: 'north', Eastern: 'east', Southern: 'south', Western: 'west' };
@@ -346,7 +507,8 @@ export class OnlineGameUI {
 
     // ─── Match History ───────────────────────────────────────
 
-    _showMatchHistory() {
+    _showMatchHistory(casualMode = false) {
+        if (casualMode) this._casualMode = true;
         const history = MatchHistory.getHistory();
 
         const rows = history.length === 0
@@ -392,7 +554,7 @@ export class OnlineGameUI {
             link.download = 'match_history.csv';
             link.click();
         };
-        document.getElementById('btn-history-back').onclick = () => this.showLobby();
+        document.getElementById('btn-history-back').onclick = () => this._goBackToLobby();
         const clearBtn = document.getElementById('btn-clear-history');
         if (clearBtn) {
             clearBtn.onclick = () => {
@@ -400,5 +562,45 @@ export class OnlineGameUI {
                 this._showMatchHistory();
             };
         }
+    }
+
+    // ─── Card Reward Popup ───────────────────────────────────
+
+    _showCardRewardPopup(cards, source) {
+        // Remove any existing popup
+        document.querySelectorAll('.card-reward-overlay').forEach(el => el.remove());
+
+        const overlay = document.createElement('div');
+        overlay.className = 'card-reward-overlay';
+        overlay.innerHTML = `
+            <div class="card-reward-popup">
+                <h2 class="card-reward-title">🎁 Cards Unlocked!</h2>
+                <p class="card-reward-source">${source} Reward</p>
+                <div class="card-reward-grid">
+                    ${cards.map(c => `
+                        <div class="card-reward-item">
+                            <img class="card-reward-img" src="./output-web/${c.id}.webp" alt="${c.name || c.id}"
+                                 onerror="this.style.display='none'" />
+                            <div class="card-reward-name">${c.name || c.id}</div>
+                            <div class="card-reward-region">${c.region || ''}</div>
+                        </div>
+                    `).join('')}
+                </div>
+                <button class="menu-btn card-reward-dismiss">Continue</button>
+            </div>
+        `;
+
+        document.body.appendChild(overlay);
+        requestAnimationFrame(() => overlay.classList.add('visible'));
+
+        const dismiss = () => {
+            overlay.classList.remove('visible');
+            setTimeout(() => overlay.remove(), 300);
+        };
+
+        overlay.querySelector('.card-reward-dismiss').onclick = dismiss;
+        overlay.onclick = (e) => {
+            if (e.target === overlay) dismiss();
+        };
     }
 }

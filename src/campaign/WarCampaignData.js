@@ -183,16 +183,13 @@ export class WarCampaignState {
 
     isCampaignOver() {
         const standings = this.getStandings();
-        if (this.currentRound > 3) {
-            // After round 3+, check for a clear winner
+        // Note: this is called BEFORE advanceRound(), so currentRound
+        // is the round that just finished (e.g. 3 after Round 3 ends).
+        if (this.currentRound >= 3) {
+            // After round 3+, check for a clear VP leader
             if (standings[0].vp > standings[1].vp) return true;
-            // If tie after round 4, it's still over (would need another tiebreaker but let's cap at reasonable)
-            if (this.currentRound > 4) return true;
-            return false;
-        }
-        // After round 3 in 2P, if someone has 3 VP they auto-win
-        if (this.playerCount <= 2 && this.currentRound >= 3) {
-            if (standings[0].vp >= 3) return true;
+            // If tie after round 4 (tiebreaker), cap the campaign
+            if (this.currentRound >= 4) return true;
         }
         return false;
     }

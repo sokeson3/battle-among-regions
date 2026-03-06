@@ -105,8 +105,19 @@ export function register(effectEngine, cardDB) {
                     ctx.attacker?.instanceId !== ctx.source?.instanceId;
             },
             execute: (gs, ctx, ee) => {
+                // Find defending player: for unit attacks, use defenderOwner;
+                // for direct LP attacks, use target.player
                 const defender = ctx.defenderOwner || ctx.target?.player;
-                if (defender) {
+                if (!defender) {
+                    // Fallback: find the opponent being attacked
+                    const attackerOwner = gs.getPlayerById(ctx.attacker?.ownerId);
+                    if (attackerOwner) {
+                        const opponent = gs.getOpponent(attackerOwner.id);
+                        if (opponent) {
+                            ee.dealDamageToLP(opponent.id, 200, 'Sunreaver Priest');
+                        }
+                    }
+                } else {
                     ee.dealDamageToLP(defender.id, 200, 'Sunreaver Priest');
                 }
             },
@@ -128,10 +139,9 @@ export function register(effectEngine, cardDB) {
             requiresTarget: true,
             targetType: 'enemy_unit',
             targets: (gs, ctx) => gs.getOpponents(ctx.sourcePlayer.id).flatMap(o => o.getFieldUnits()),
-            execute: (gs, ctx, ee) => {
+            execute: async (gs, ctx, ee) => {
                 if (ctx.target) {
-                    ee.dealDamageToUnit(ctx.target, 200, 'Arena Champion');
-                    if (ctx.target.damageTaken >= ctx.target.currentDEF) ee.destroyUnit(ctx.target);
+                    await ee.dealDamageToUnit(ctx.target, 200, 'Arena Champion');
                 }
             },
         }),
@@ -147,14 +157,10 @@ export function register(effectEngine, cardDB) {
             cardId: 'S018',
             trigger: EFFECT_EVENTS.ON_SUMMON,
             description: 'Deal 100 damage to all enemy units',
-            execute: (gs, ctx, ee) => {
+            execute: async (gs, ctx, ee) => {
                 const enemies = gs.getOpponents(ctx.sourcePlayer.id).flatMap(o => o.getFieldUnits());
                 for (const unit of enemies) {
-                    ee.dealDamageToUnit(unit, 100, 'Molten Golem');
-                }
-                // Check for destroyed units
-                for (const unit of [...enemies]) {
-                    if (unit.damageTaken >= unit.currentDEF) ee.destroyUnit(unit);
+                    await ee.dealDamageToUnit(unit, 100, 'Molten Golem');
                 }
             },
         }),
@@ -219,15 +225,17 @@ export function register(effectEngine, cardDB) {
 
     // S024: Colossus of the Sun — Pierce (keyword only)
 
-    // S025: Charging Rhino — First kill each round: can attack again
+    // S025: Charging Rhino — First kill each round: can attack again (battle kills only)
     effectEngine.registerCardEffects('S025', [
         createEffect({
             cardId: 'S025',
             trigger: EFFECT_EVENTS.ON_DESTROY,
-            description: 'Can make a second attack after first kill',
+            description: 'Can make a second attack after first kill in battle',
             condition: (gs, ctx) => {
-                // Check if the Rhino destroyed a unit
-                return ctx.destroyedCard?.ownerId !== ctx.source?.ownerId && !ctx.source?._rhinoUsedDoubleAttack;
+                // Check if the Rhino destroyed a unit IN BATTLE
+                if (ctx.destroyedCard?.ownerId === ctx.source?.ownerId) return false;
+                if (ctx.destroyedCard?._lastBattleKiller !== ctx.source?.instanceId) return false;
+                return !ctx.source?._rhinoUsedDoubleAttack;
             },
             execute: (gs, ctx, ee) => {
                 if (ctx.source) {
@@ -268,6 +276,8 @@ export function register(effectEngine, cardDB) {
                         'Siege Engineer: Choose action'
                     );
                     if (choice?.value === 'switch') {
+                        ee._cleanupLandmarkBuffs(withLandmarks[0], withLandmarks[0].landmarkZone);
+                        ee._cleanupLandmarkBuffs(withLandmarks[1], withLandmarks[1].landmarkZone);
                         const temp = withLandmarks[0].landmarkZone;
                         withLandmarks[0].landmarkZone = withLandmarks[1].landmarkZone;
                         withLandmarks[1].landmarkZone = temp;
@@ -277,6 +287,7 @@ export function register(effectEngine, cardDB) {
                         await ee.trigger(EFFECT_EVENTS.ON_LANDMARK_PLACED, { landmark: withLandmarks[1].landmarkZone, placer: ctx.sourcePlayer, targetPlayer: withLandmarks[1] });
                     } else if (choice?.value === 'move' && withoutLandmarks.length > 0) {
                         const landmark = withLandmarks[0].landmarkZone;
+                        ee._cleanupLandmarkBuffs(withLandmarks[0], landmark);
                         withLandmarks[0].landmarkZone = null;
                         withoutLandmarks[0].landmarkZone = landmark;
                         gs.log('EFFECT', `${landmark.name} moved to ${withoutLandmarks[0].name}'s zone!`);
@@ -284,6 +295,7 @@ export function register(effectEngine, cardDB) {
                     }
                 } else if (withLandmarks.length === 1 && withoutLandmarks.length > 0) {
                     const landmark = withLandmarks[0].landmarkZone;
+                    ee._cleanupLandmarkBuffs(withLandmarks[0], landmark);
                     withLandmarks[0].landmarkZone = null;
                     withoutLandmarks[0].landmarkZone = landmark;
                     gs.log('EFFECT', `${landmark.name} moved!`);
@@ -311,12 +323,11 @@ export function register(effectEngine, cardDB) {
                 const lpTargets = opponents.map(o => ({ type: 'lp', player: o, name: `${o.name}'s LP` }));
                 return [...enemyUnits, ...lpTargets];
             },
-            execute: (gs, ctx, ee) => {
+            execute: async (gs, ctx, ee) => {
                 if (ctx.target?.type === 'lp') {
                     ee.dealDamageToLP(ctx.target.player.id, 100, 'Pyromancer Adept');
                 } else if (ctx.target) {
-                    ee.dealDamageToUnit(ctx.target, 100, 'Pyromancer Adept');
-                    if (ctx.target.damageTaken >= ctx.target.currentDEF) ee.destroyUnit(ctx.target);
+                    await ee.dealDamageToUnit(ctx.target, 100, 'Pyromancer Adept');
                 }
             },
         }),
@@ -347,9 +358,9 @@ export function register(effectEngine, cardDB) {
             requiresTarget: true,
             targetType: 'enemy_unit',
             targets: (gs, ctx) => gs.getOpponents(ctx.sourcePlayer.id).flatMap(o => o.getFieldUnits()),
-            execute: (gs, ctx, ee) => {
+            execute: async (gs, ctx, ee) => {
                 if (ctx.target) {
-                    ee.dealDamageToUnit(ctx.target, 100, 'Quick Strike');
+                    await ee.dealDamageToUnit(ctx.target, 100, 'Quick Strike');
                 }
             },
         }),
@@ -382,36 +393,36 @@ export function register(effectEngine, cardDB) {
                 targets.push(...opponents.map(o => ({ type: 'lp', player: o, name: `${o.name}'s LP` })));
                 return targets;
             },
-            execute: (gs, ctx, ee) => {
+            execute: async (gs, ctx, ee) => {
                 if (ctx.target?.type === 'lp') {
                     ee.dealDamageToLP(ctx.target.player.id, 300, 'Searing Bolt');
                 } else if (ctx.target) {
-                    ee.dealDamageToUnit(ctx.target, 300, 'Searing Bolt');
+                    await ee.dealDamageToUnit(ctx.target, 300, 'Searing Bolt');
                 }
             },
         }),
     ]);
 
-    // S035: Challenge — Force battle between friendly ATK and enemy unit
+    // S035: Challenge — Choose a region, force friendly vs enemy combat with landmark bonuses
     effectEngine.registerCardEffects('S035', [
         createEffect({
             cardId: 'S035',
             trigger: 'SELF',
-            description: 'Force a battle between two units',
+            description: 'Choose a region, then force a friendly and enemy unit to fight',
             execute: async (gs, ctx, ee) => {
-                // Choose a friendly unit in ATK position
-                const friendlyATK = ctx.sourcePlayer.getFieldUnits().filter(u => u.position === 'ATK');
-                if (friendlyATK.length === 0) {
-                    gs.log('EFFECT', 'Challenge: No friendly units in ATK position!');
+                // Step 1: Choose friendly unit
+                const friendlies = ctx.sourcePlayer.getFieldUnits();
+                if (friendlies.length === 0) {
+                    gs.log('EFFECT', 'Challenge: No friendly units!');
                     return;
                 }
-                const friendlyChoice = await ee.requestTarget(friendlyATK, 'Choose your unit in ATK position');
+                const friendlyChoice = await ee.requestTarget(friendlies, 'Choose your unit to fight');
                 if (!friendlyChoice) return;
 
-                // Choose an enemy unit
+                // Step 2: Choose enemy unit
                 const enemies = gs.getOpponents(ctx.sourcePlayer.id).flatMap(o => o.getFieldUnits());
                 if (enemies.length === 0) {
-                    gs.log('EFFECT', 'Challenge: No enemy units to fight!');
+                    gs.log('EFFECT', 'Challenge: No enemy units!');
                     return;
                 }
                 const enemyChoice = await ee.requestTarget(enemies, 'Choose an enemy unit to fight');
@@ -422,14 +433,94 @@ export function register(effectEngine, cardDB) {
                 const attackerOwner = ctx.sourcePlayer;
                 const defenderOwner = gs.getPlayerById(defender.ownerId);
 
-                gs.log('EFFECT', `Challenge! ${attacker.name} fights ${defender.name}!`);
+                // Step 3: Choose which region (landmark) the battle happens in
+                const landmarkOptions = [];
+                for (const p of gs.players) {
+                    if (p.landmarkZone && !p.landmarkZone.silenced) {
+                        landmarkOptions.push({
+                            label: `${p.landmarkZone.name} (${p.name}'s region)`,
+                            value: p.id,
+                            cardId: p.landmarkZone.cardId,
+                        });
+                    }
+                }
 
-                // Resolve combat inline (ATK vs ATK style — both deal damage)
+                let chosenLandmark = null;
+                let chosenLandmarkOwner = null;
+                if (landmarkOptions.length >= 2) {
+                    const regionChoice = await ee.requestChoice(landmarkOptions, 'Choose which region to battle in');
+                    if (regionChoice) {
+                        chosenLandmarkOwner = gs.getPlayerById(regionChoice.value);
+                        chosenLandmark = chosenLandmarkOwner.landmarkZone;
+                    }
+                } else if (landmarkOptions.length === 1) {
+                    chosenLandmarkOwner = gs.getPlayerById(landmarkOptions[0].value);
+                    chosenLandmark = chosenLandmarkOwner.landmarkZone;
+                }
+
+                gs.log('EFFECT', `Challenge! ${attacker.name} fights ${defender.name}${chosenLandmark ? ` in ${chosenLandmark.name}'s region` : ''}!`);
+
+                // Step 4: Apply chosen landmark's combat bonuses
+                if (chosenLandmark) {
+                    // S002: Volcanic Forge — Southern units +200 ATK
+                    if (chosenLandmark.cardId === 'S002') {
+                        if (attacker.region === 'Southern') {
+                            ee.applyTempStatMod(attacker, 200, 0, 'Volcanic Forge (Challenge)');
+                        }
+                        if (defender.region === 'Southern') {
+                            ee.applyTempStatMod(defender, 200, 0, 'Volcanic Forge (Challenge)');
+                        }
+                    }
+                    // Add other landmark combat effects here as needed
+                }
+
+                // Step 5: Resolve combat — respect defender position
                 const atkDmg = Math.max(0, attacker.currentATK);
-                const defDmg = Math.max(0, defender.currentATK);
 
-                ee.dealDamageToUnit(defender, atkDmg, `Challenge (${attacker.name})`);
-                ee.dealDamageToUnit(attacker, defDmg, `Challenge (${defender.name})`);
+                if (defender.position === 'DEF') {
+                    // ATK vs DEF: only attacker deals damage, no counter-damage
+                    const defRemainingDEF = defender.currentDEF - defender.damageTaken;
+                    if (atkDmg < defRemainingDEF) {
+                        // Attacker's ATK less than defender's remaining DEF — rebound LP damage
+                        await ee.dealDamageToUnit(defender, atkDmg, `Challenge (${attacker.name})`);
+                        const rebound = defRemainingDEF - atkDmg;
+                        ee.dealDamageToLP(attackerOwner.id, rebound, `Challenge rebound from ${defender.name}`);
+                    } else {
+                        await ee.dealDamageToUnit(defender, atkDmg, `Challenge (${attacker.name})`);
+                        // Pierce from Challenge attacker
+                        if (attacker.keywords.includes('PIERCE') && atkDmg > defRemainingDEF) {
+                            const pierceDmg = atkDmg - defRemainingDEF;
+                            ee.dealDamageToLP(defenderOwner.id, pierceDmg, `Challenge Pierce (${attacker.name})`);
+                        }
+                    }
+                } else {
+                    // ATK vs ATK: both deal damage simultaneously
+                    const defDmg = Math.max(0, defender.currentATK);
+                    const defRemainingDEF = defender.currentDEF - defender.damageTaken;
+                    const atkRemainingDEF = attacker.currentDEF - attacker.damageTaken;
+
+                    // Suppress auto-destroy for simultaneous damage
+                    ee._suppressAutoDestroy = true;
+                    const excessToDefender = Math.max(0, atkDmg - defRemainingDEF);
+                    await ee.dealDamageToUnit(defender, atkDmg, `Challenge (${attacker.name})`);
+                    const excessToAttacker = Math.max(0, defDmg - atkRemainingDEF);
+                    await ee.dealDamageToUnit(attacker, defDmg, `Challenge (${defender.name})`);
+                    ee._suppressAutoDestroy = false;
+
+                    // Excess damage to LP
+                    if (excessToDefender > 0) {
+                        ee.dealDamageToLP(defenderOwner.id, excessToDefender, `Challenge excess (${attacker.name})`);
+                    }
+                    if (excessToAttacker > 0) {
+                        ee.dealDamageToLP(attackerOwner.id, excessToAttacker, `Challenge excess (${defender.name})`);
+                    }
+
+                    // Destroy after simultaneous damage
+                    const defenderDead = defender.damageTaken >= defender.currentDEF;
+                    const attackerDead = attacker.damageTaken >= attacker.currentDEF;
+                    if (defenderDead) await ee.destroyUnit(defender);
+                    if (attackerDead) await ee.destroyUnit(attacker);
+                }
 
                 gs.log('EFFECT', `Challenge resolved: ${attacker.name} ${attacker.damageTaken}/${attacker.currentDEF} | ${defender.name} ${defender.damageTaken}/${defender.currentDEF}`);
             },
@@ -444,9 +535,9 @@ export function register(effectEngine, cardDB) {
             description: 'Deal 400 damage to a damaged enemy unit',
             requiresTarget: true,
             targets: (gs, ctx) => gs.getOpponents(ctx.sourcePlayer.id).flatMap(o => o.getFieldUnits().filter(u => u.damageTaken > 0)),
-            execute: (gs, ctx, ee) => {
+            execute: async (gs, ctx, ee) => {
                 if (ctx.target) {
-                    ee.dealDamageToUnit(ctx.target, 400, 'Finishing Blow');
+                    await ee.dealDamageToUnit(ctx.target, 400, 'Finishing Blow');
                 }
             },
         }),
@@ -481,7 +572,7 @@ export function register(effectEngine, cardDB) {
                     const target = await ee.requestTarget(eligible, `Target ${i + 1} for 200 damage`);
                     if (target) {
                         alreadyTargeted.push(target.instanceId);
-                        ee.dealDamageToUnit(target, 200, 'Molten Rain');
+                        await ee.dealDamageToUnit(target, 200, 'Molten Rain');
                     }
                 }
             },
@@ -524,9 +615,9 @@ export function register(effectEngine, cardDB) {
             requiresTarget: true,
             targetType: 'enemy_unit',
             targets: (gs, ctx) => gs.getOpponents(ctx.sourcePlayer.id).flatMap(o => o.getFieldUnits()),
-            execute: (gs, ctx, ee) => {
+            execute: async (gs, ctx, ee) => {
                 if (ctx.target) {
-                    ee.dealDamageToUnit(ctx.target, 600, 'Unstable Blast');
+                    await ee.dealDamageToUnit(ctx.target, 600, 'Unstable Blast');
                 }
             },
         }),
@@ -557,9 +648,8 @@ export function register(effectEngine, cardDB) {
             trigger: EFFECT_EVENTS.ON_ATTACK_DECLARE,
             description: 'Deal 200 damage to attacking unit',
             condition: (gs, ctx) => ctx.attackerOwner?.id !== ctx.sourcePlayer.id,
-            execute: (gs, ctx, ee) => {
-                ee.dealDamageToUnit(ctx.attacker, 200, 'Explosive Rune');
-                if (ctx.attacker.damageTaken >= ctx.attacker.currentDEF) ee.destroyUnit(ctx.attacker);
+            execute: async (gs, ctx, ee) => {
+                await ee.dealDamageToUnit(ctx.attacker, 200, 'Explosive Rune');
             },
         }),
     ]);
@@ -630,12 +720,11 @@ export function register(effectEngine, cardDB) {
             trigger: EFFECT_EVENTS.ON_ATTACK_DECLARE,
             description: 'Deal attacker\'s ATK as damage to itself',
             condition: (gs, ctx) => ctx.attackerOwner?.id !== ctx.sourcePlayer.id,
-            execute: (gs, ctx, ee) => {
+            execute: async (gs, ctx, ee) => {
                 const dmg = ctx.attacker.currentATK;
-                ee.dealDamageToUnit(ctx.attacker, dmg, 'Spiked Barricade');
+                await ee.dealDamageToUnit(ctx.attacker, dmg, 'Spiked Barricade');
                 gs.log('TRAP', `Spiked Barricade reflects ${dmg} damage to ${ctx.attacker.name}!`);
                 if (ctx.attacker.damageTaken >= ctx.attacker.currentDEF) {
-                    ee.destroyUnit(ctx.attacker);
                     if (gs.battleState) gs.battleState.attackNegated = true;
                 }
             },
@@ -651,13 +740,10 @@ export function register(effectEngine, cardDB) {
             condition: (gs, ctx) => {
                 return ctx.summoningPlayer?.id !== ctx.sourcePlayer.id && ctx.summonedCard?.manaCost >= 5;
             },
-            execute: (gs, ctx, ee) => {
+            execute: async (gs, ctx, ee) => {
                 const enemyUnits = ctx.summoningPlayer.getFieldUnits();
                 for (const unit of enemyUnits) {
-                    ee.dealDamageToUnit(unit, 400, 'Pressure Plate');
-                }
-                for (const unit of [...enemyUnits]) {
-                    if (unit.damageTaken >= unit.currentDEF) ee.destroyUnit(unit);
+                    await ee.dealDamageToUnit(unit, 400, 'Pressure Plate');
                 }
                 gs.log('TRAP', 'Pressure Plate explodes for 400 damage to all enemy units!');
             },

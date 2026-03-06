@@ -139,7 +139,7 @@ export class TutorialUI {
         content: `
           <div class="tut-block">
             <div class="tut-hero-banner">
-              <img src="./Background.webp" alt="Battle Among Regions" class="tut-hero-img" />
+              <img src="./Background.png" alt="Battle Among Regions" class="tut-hero-img" />
               <div class="tut-hero-overlay">
                 <p>Two commanders. Four regions. One battlefield.</p>
               </div>
@@ -377,7 +377,7 @@ export class TutorialUI {
               <div class="tut-flip-card-container">
                 <div class="tut-flip-card" id="demo-spell-card">
                   <div class="tut-flip-front">${this._cardImg('N040', 'Call the Pack', 'width:100%;height:100%')}</div>
-                  <div class="tut-flip-back"><img src="./Background.webp" alt="Face-down" style="width:100%;height:100%;object-fit:cover;border-radius:var(--radius-card)" /><div class="tut-flip-label">Set Spell</div></div>
+                  <div class="tut-flip-back"><img src="./Background.png" alt="Face-down" style="width:100%;height:100%;object-fit:cover;border-radius:var(--radius-card)" /><div class="tut-flip-label">Set Spell</div></div>
                 </div>
               </div>
             </div>
@@ -706,7 +706,7 @@ export class TutorialUI {
         content: `
           <div class="tut-block">
             <div class="tut-hero-banner small">
-              <img src="./Background.webp" alt="Battle" class="tut-hero-img" />
+              <img src="./Background.png" alt="Battle" class="tut-hero-img" />
               <div class="tut-hero-overlay"><p>Challenge the AI and prove your worth!</p></div>
             </div>
             <div class="tut-card-types">

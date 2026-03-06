@@ -138,6 +138,14 @@ export class ActionValidator {
         if (unitInstance.hasChangedPositionThisTurn) {
             return { valid: false, reason: 'Unit cannot attack after changing position this turn.' };
         }
+        // W008/W048: Unit was locked from attacking by previous turn's effect
+        if (unitInstance._cannotAttackNextTurn) {
+            return { valid: false, reason: 'This unit cannot attack this turn.' };
+        }
+        // N007: Ice Wall Sentinel — cannot attack
+        if (unitInstance.cardId === 'N007' && !unitInstance.silenced) {
+            return { valid: false, reason: 'Ice Wall Sentinel cannot attack.' };
+        }
 
         return { valid: true };
     }
@@ -180,10 +188,13 @@ export class ActionValidator {
         const gs = this.gameState;
         const player = gs.getPlayerById(playerId);
         if (!player) return { valid: false, reason: 'Invalid player.' };
-        // Skip turn/phase checks when activating in response to an opponent's action
+        // Active player can activate set spells in chain responses during their turn
         if (!options.isResponse) {
             if (!gs.isPlayersTurn(playerId)) return { valid: false, reason: 'Not your turn.' };
-            if (gs.phase !== PHASES.MAIN1 && gs.phase !== PHASES.MAIN2) return { valid: false, reason: 'Can only activate during Main Phase.' };
+            if (gs.phase !== PHASES.MAIN1 && gs.phase !== PHASES.MAIN2 && gs.phase !== PHASES.BATTLE) return { valid: false, reason: 'Can only activate during Main Phase or Battle Phase.' };
+        } else {
+            // Even in response mode, only the turn player can chain spells
+            if (!gs.isPlayersTurn(playerId)) return { valid: false, reason: 'Not your turn.' };
         }
         if (cardInstance.type !== 'Spell') return { valid: false, reason: 'Card is not a Spell.' };
         if (cardInstance.faceUp) return { valid: false, reason: 'Card is already face-up.' };
@@ -254,7 +265,7 @@ export class ActionValidator {
                     'phase_change': ['ON_PHASE_CHANGE', 'ON_BATTLE_PHASE_START'],
                     'set': [],
                     'destroy': ['ON_FRIENDLY_DESTROY', 'ON_DESTROY'],
-                    'ability': [],
+                    'ability': ['ON_ABILITY_ACTIVATE'],
                 };
                 const allowedTriggers = triggerType ? (triggerTypeToEvents[triggerType] || []) : [];
 

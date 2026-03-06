@@ -7,4 +7,4 @@ echo Starting server on port 4000...
 echo Press Ctrl+C to stop the server.
 echo.
 cd /d "%~dp0"
-node server/server.mjs
+node --env-file=.env server/server.mjs

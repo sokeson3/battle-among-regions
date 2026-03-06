@@ -2,6 +2,9 @@
 // CardDatabase.js — Parses CSV and provides card lookup
 // ─────────────────────────────────────────────────────────────
 
+/** Maximum copies of any single card a player can own / use in deckbuilding */
+export const MAX_COPIES_PER_CARD = 3;
+
 export class CardDatabase {
     constructor() {
         this.cards = new Map();
@@ -114,7 +117,7 @@ export class CardDatabase {
         if (/When this unit is destroyed/i.test(desc)) triggers.push('ON_SELF_DESTROY');
         if (/When destroyed/i.test(desc)) triggers.push('ON_SELF_DESTROY');
         if (/When.*(attack|declares an attack)/i.test(desc)) triggers.push('ON_ATTACK');
-        if (/Once per round/i.test(desc)) triggers.push('ACTIVATED');
+        if (/Once per round,?\s*during your Main Phase/i.test(desc)) triggers.push('ACTIVATED');
         if (/End of (your|the) turn/i.test(desc)) triggers.push('ON_TURN_END');
         if (/At the start of your turn/i.test(desc)) triggers.push('ON_TURN_START');
         if (/LANDMARK:/i.test(desc)) triggers.push('LANDMARK_AURA');
@@ -195,7 +198,7 @@ export class CardDatabase {
             summonedThisTurn: false,
             hasAttackedThisTurn: false,
             attackCount: 0,
-            maxAttacks: 1,
+            maxAttacks: template.id === 'W019' ? 2 : 1,
             damageTaken: 0,
             temporaryEffects: [], // Effects that expire at end of turn
             permanentEffects: [], // Effects that persist

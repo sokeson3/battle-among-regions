@@ -9,9 +9,12 @@ import { dirname, join } from 'path';
 import express from 'express';
 import { WebSocketServer } from 'ws';
 import { readFileSync, appendFileSync, existsSync } from 'fs';
+import Stripe from 'stripe';
+import * as DB from './db.mjs';
 
 // Import game engine
 import { GameController } from '../src/engine/GameController.js';
+import { CardDatabase } from '../src/engine/CardDatabase.js';
 import { WAR_ROUNDS_2P } from '../src/campaign/WarCampaignData.js';
 import { BotPlayer } from './BotPlayer.js';
 import * as NorthernEffects from '../src/effects/NorthernEffects.js';
@@ -26,6 +29,49 @@ const PROJECT_ROOT = join(__dirname, '..');
 // ─── Configuration ───────────────────────────────────────────
 const PORT = process.env.PORT || 4000;
 const MATCH_LOG_PATH = join(PROJECT_ROOT, 'match_history.csv');
+
+// ─── Stripe Setup ────────────────────────────────────────────
+const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
+const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
+const STRIPE_PUBLISHABLE_KEY = process.env.STRIPE_PUBLISHABLE_KEY;
+const CLIENT_URL = process.env.CLIENT_URL || `http://localhost:${PORT}`;
+
+let stripe = null;
+if (STRIPE_SECRET_KEY) {
+    stripe = new Stripe(STRIPE_SECRET_KEY);
+    console.log('✅ Stripe initialized.');
+} else {
+    console.warn('⚠ STRIPE_SECRET_KEY not set — store purchases disabled.');
+}
+
+// ─── Cosmetics Store Catalog ─────────────────────────────────
+// Authoritative catalog of all purchasable cosmetics with prices (in pence).
+// These IDs must match the definitions in CosmeticsManager.js.
+const STORE_CATALOG = [
+    // Playmats
+    { type: 'playmat', id: 'N001', name: 'The Frostfell Citadel', price: 299, currency: 'gbp' },
+    { type: 'playmat', id: 'N002', name: 'Ancestral Ice Cairn', price: 299, currency: 'gbp' },
+    { type: 'playmat', id: 'E001', name: 'Hidden Monastery', price: 299, currency: 'gbp' },
+    { type: 'playmat', id: 'E002', name: 'Scroll Library', price: 299, currency: 'gbp' },
+    { type: 'playmat', id: 'S001', name: 'Arena of Trials', price: 299, currency: 'gbp' },
+    { type: 'playmat', id: 'S002', name: 'Volcanic Forge', price: 299, currency: 'gbp' },
+    { type: 'playmat', id: 'S038', name: 'Scorched Earth', price: 299, currency: 'gbp' },
+    { type: 'playmat', id: 'W001', name: 'Echoing Canyon', price: 299, currency: 'gbp' },
+    { type: 'playmat', id: 'W002', name: 'Mystic Menagerie', price: 299, currency: 'gbp' },
+    // Sleeves
+    { type: 'sleeve', id: 'inferno', name: 'Inferno Crest', price: 199, currency: 'gbp' },
+    { type: 'sleeve', id: 'glacial', name: 'Glacial Sigil', price: 199, currency: 'gbp' },
+    { type: 'sleeve', id: 'shadow_scroll', name: 'Shadow Scroll', price: 199, currency: 'gbp' },
+    { type: 'sleeve', id: 'spirit_totem', name: 'Spirit Totem', price: 199, currency: 'gbp' },
+    // Avatar Frames
+    { type: 'avatarFrame', id: 'shadow_dragon', name: 'Shadow Dragon', price: 149, currency: 'gbp' },
+    { type: 'avatarFrame', id: 'frost_guardian', name: 'Frost Guardian', price: 149, currency: 'gbp' },
+    { type: 'avatarFrame', id: 'flame_crown', name: 'Flame Crown', price: 149, currency: 'gbp' },
+    { type: 'avatarFrame', id: 'totem_spirit', name: 'Totem Spirit', price: 149, currency: 'gbp' },
+    // Emote Sets
+    { type: 'emoteSet', id: 'spirit_totems', name: 'Spirit Totems', price: 99, currency: 'gbp' },
+    { type: 'emoteSet', id: 'battle_cries', name: 'Battle Cries', price: 99, currency: 'gbp' },
+];
 
 // ─── CSV Match Logger ────────────────────────────────────────
 
@@ -45,6 +91,7 @@ class RoomManager {
     constructor() {
         this.rooms = new Map(); // roomCode -> Room
         this.matchQueue = [];   // [{ ws, name }] — players waiting for a match
+        this.duelMatchQueue = []; // [{ ws, name }] — players waiting for duel with deck select
     }
 
     generateCode() {
@@ -75,7 +122,7 @@ class RoomManager {
         const code = this.generateCode();
         const room = {
             code,
-            players: [{ ws, name: playerName, region: null, id: 0 }],
+            players: [{ ws, name: playerName, region: null, id: 0, cosmetics: null }],
             controller: null,
             phase: 'LOBBY', // LOBBY, LANDMARK, MULLIGAN, PLAYING
             landmarkSelections: {},
@@ -97,10 +144,10 @@ class RoomManager {
 
     // ─── Matchmaking Queue ───────────────────────────────────
 
-    addToQueue(ws, name) {
+    addToQueue(ws, name, cosmetics = null) {
         // Remove if already in queue
         this.removeFromQueue(ws);
-        this.matchQueue.push({ ws, name });
+        this.matchQueue.push({ ws, name, cosmetics });
     }
 
     removeFromQueue(ws) {
@@ -118,8 +165,38 @@ class RoomManager {
         const p2 = this.matchQueue.shift();
 
         const room = this.createRoom(p1.ws, p1.name);
-        room.players.push({ ws: p2.ws, name: p2.name, region: null, id: 1 });
+        room.players[0].cosmetics = p1.cosmetics || null;
+        room.players.push({ ws: p2.ws, name: p2.name, region: null, id: 1, cosmetics: p2.cosmetics || null });
         this.assignRandomRegions(room);
+        return room;
+    }
+
+    // ─── Duel Matchmaking Queue (with deck select) ───────────
+
+    addToDuelQueue(ws, name, cosmetics = null) {
+        this.removeFromDuelQueue(ws);
+        this.duelMatchQueue.push({ ws, name, cosmetics });
+    }
+
+    removeFromDuelQueue(ws) {
+        this.duelMatchQueue = this.duelMatchQueue.filter(entry => entry.ws !== ws);
+    }
+
+    /**
+     * Try to pair two players from the duel queue.
+     * Creates a room in DUEL_DECK_SELECT phase (no regions assigned yet).
+     */
+    tryDuelMatchFromQueue() {
+        if (this.duelMatchQueue.length < 2) return null;
+
+        const p1 = this.duelMatchQueue.shift();
+        const p2 = this.duelMatchQueue.shift();
+
+        const room = this.createRoom(p1.ws, p1.name);
+        room.players[0].cosmetics = p1.cosmetics || null;
+        room.players.push({ ws: p2.ws, name: p2.name, region: null, id: 1, cosmetics: p2.cosmetics || null });
+        room.phase = 'DUEL_DECK_SELECT';
+        room.duelDeckSelections = {}; // { playerId -> { region, deckCardIds } }
         return room;
     }
 
@@ -389,6 +466,25 @@ class WarRoomManager {
         }
 
         if (isOver) {
+            // Award 3 random cards to each player for completing a war campaign
+            for (const p of warRoom.players) {
+                if (p.ws.userId) {
+                    try {
+                        const rewardIds = pickRandomRewardCards(p.ws.userId, 3);
+                        if (rewardIds.length > 0) {
+                            DB.addCardsToCollection(p.ws.userId, rewardIds);
+                            const rewardCards = rewardIds.map(id => {
+                                const card = serverCardDB.getCard(id);
+                                return card ? { id: card.id, name: card.name, region: card.region, type: card.type } : { id };
+                            });
+                            this.send(p.ws, 'CARDS_UNLOCKED', { cards: rewardCards, source: 'warCampaign' });
+                            console.log(`🎁 War campaign reward: ${p.name} unlocked ${rewardIds.join(', ')}`);
+                        }
+                    } catch (err) {
+                        console.error(`Failed to award war campaign cards to ${p.name}:`, err);
+                    }
+                }
+            }
             this.rooms.delete(warRoom.code);
         }
     }
@@ -405,12 +501,13 @@ class WarRoomManager {
 
     isCampaignOver(warRoom) {
         const standings = this.getStandings(warRoom);
-        if (warRoom.currentRound > 3) {
+        // Note: called BEFORE advanceRound(), so currentRound is the round that just finished.
+        if (warRoom.currentRound >= 3) {
+            // After round 3+, check for a clear VP leader
             if (standings[0].vp > standings[1].vp) return true;
-            if (warRoom.currentRound > 4) return true;
-            return false;
+            // If tie after round 4 (tiebreaker), cap the campaign
+            if (warRoom.currentRound >= 4) return true;
         }
-        if (warRoom.currentRound >= 3 && standings[0].vp >= 3) return true;
         return false;
     }
 
@@ -505,6 +602,51 @@ function serializeCard(card) {
     return rest;
 }
 
+/**
+ * Serialize trigger context for the client so it can render card visuals.
+ * Only extracts card names/IDs — never full card objects.
+ */
+function serializeTriggerContext(triggerType, triggerContext) {
+    if (!triggerContext) return null;
+    const ctx = {};
+    if (triggerType === 'attack') {
+        if (triggerContext.attacker) {
+            ctx.attackerCardId = triggerContext.attacker.cardId;
+            ctx.attackerName = triggerContext.attacker.name;
+        }
+        if (triggerContext.target) {
+            ctx.targetType = triggerContext.target.type;
+            if (triggerContext.target.card) {
+                ctx.targetCardId = triggerContext.target.card.cardId;
+                ctx.targetName = triggerContext.target.card.name;
+            }
+        }
+    } else if (triggerType === 'spell') {
+        if (triggerContext.spell) {
+            ctx.cardId = triggerContext.spell.cardId;
+            ctx.cardName = triggerContext.spell.name;
+        }
+    } else if (triggerType === 'summon') {
+        if (triggerContext.summonedCard) {
+            ctx.cardId = triggerContext.summonedCard.cardId;
+            ctx.cardName = triggerContext.summonedCard.name;
+        }
+    } else if (triggerType === 'ability') {
+        if (triggerContext.abilityCard) {
+            ctx.cardId = triggerContext.abilityCard.cardId;
+            ctx.cardName = triggerContext.abilityCard.name;
+        }
+    } else if (triggerType === 'destroy') {
+        if (triggerContext.destroyedCard) {
+            ctx.cardId = triggerContext.destroyedCard.cardId;
+            ctx.cardName = triggerContext.destroyedCard.name;
+        }
+    } else if (triggerType === 'phase_change') {
+        ctx.phase = triggerContext.phase;
+    }
+    return Object.keys(ctx).length > 0 ? ctx : null;
+}
+
 // ─── Game State Broadcasting ─────────────────────────────────
 
 function broadcastGameState(room, roomMgr) {
@@ -526,13 +668,13 @@ async function startGame(room, roomMgr, csvText) {
 
     // Wire up callbacks for interactive effects
     controller.effectEngine.onTargetRequired = (targets, desc, cb) => {
-        // Find which player needs to pick a target (active player)
-        const activeId = controller.gameState.activePlayerIndex;
-        const activeP = room.players.find(p => p.id === activeId);
-        if (!activeP) { cb(targets[0]); return; }
+        // Use source player (card owner) for target selection, fall back to active player
+        const sourceId = controller.effectEngine._currentSourcePlayerId ?? controller.gameState.activePlayerIndex;
+        const sourceP = room.players.find(p => p.id === sourceId);
+        if (!sourceP) { cb(targets[0]); return; }
 
         // Bot auto-resolves targets
-        if (activeP.isBot && room.botPlayer) {
+        if (sourceP.isBot && room.botPlayer) {
             const chosen = room.botPlayer.chooseTarget(targets, desc);
             setTimeout(() => cb(chosen || targets[0]), 100);
             return;
@@ -540,32 +682,38 @@ async function startGame(room, roomMgr, csvText) {
 
         // Store callback for when client responds
         room.pendingTargetCb = cb;
-        room.pendingTargetPlayerId = activeId;
+        room.pendingTargetPlayerId = sourceId;
 
-        const serializedTargets = targets.map(t => ({
-            instanceId: t.instanceId,
-            cardId: t.cardId,
-            name: t.name,
-            type: t.type,
-        }));
-        roomMgr.send(activeP.ws, 'REQUEST_TARGET', { targets: serializedTargets, description: desc });
+        const serializedTargets = targets.map(t => {
+            if (t.type === 'lp') {
+                return { __lp_target: true, type: 'lp', name: t.name, playerId: t.player?.id };
+            }
+            return {
+                instanceId: t.instanceId,
+                cardId: t.cardId,
+                name: t.name,
+                type: t.type,
+            };
+        });
+        roomMgr.send(sourceP.ws, 'REQUEST_TARGET', { targets: serializedTargets, description: desc });
     };
 
     controller.effectEngine.onChoiceRequired = (options, desc, cb) => {
-        const activeId = controller.gameState.activePlayerIndex;
-        const activeP = room.players.find(p => p.id === activeId);
-        if (!activeP) { cb(options[0]); return; }
+        // Use source player (card owner) for choice selection, fall back to active player
+        const sourceId = controller.effectEngine._currentSourcePlayerId ?? controller.gameState.activePlayerIndex;
+        const sourceP = room.players.find(p => p.id === sourceId);
+        if (!sourceP) { cb(options[0]); return; }
 
         // Bot auto-resolves choices
-        if (activeP.isBot && room.botPlayer) {
+        if (sourceP.isBot && room.botPlayer) {
             const chosen = room.botPlayer.chooseOption(options, desc);
             setTimeout(() => cb(chosen || options[0]), 100);
             return;
         }
 
         room.pendingChoiceCb = cb;
-        room.pendingChoicePlayerId = activeId;
-        roomMgr.send(activeP.ws, 'REQUEST_CHOICE', { options, description: desc });
+        room.pendingChoicePlayerId = sourceId;
+        roomMgr.send(sourceP.ws, 'REQUEST_CHOICE', { options, description: desc });
     };
 
     controller.onOpponentResponse = (player, cb, chainContext) => {
@@ -578,8 +726,9 @@ async function startGame(room, roomMgr, csvText) {
             return;
         }
 
+        const activeId = controller.gameState.activePlayerIndex;
         const faceDownCards = player.getFaceDownCards().filter(c =>
-            (c.type === 'Spell' || c.type === 'Trap') && !c.setThisTurn
+            (c.type === 'Trap' || (c.type === 'Spell' && player.id === activeId)) && !c.setThisTurn
         );
         if (faceDownCards.length === 0) { cb({ activate: false }); return; }
 
@@ -606,20 +755,32 @@ async function startGame(room, roomMgr, csvText) {
         });
         console.log(`🎴 Response: P${player.id} has ${faceDownCards.length} face-down, ${annotated.filter(c => c.canActivate).length} activatable (trigger: ${chainContext?.triggerType})`);
 
+        // If no cards are eligible, auto-pass without showing the dialog
+        if (!annotated.some(c => c.canActivate)) { cb({ activate: false }); return; }
+
         room.pendingResponseCb = cb;
         room.pendingResponsePlayerId = player.id;
-        roomMgr.send(p.ws, 'REQUEST_RESPONSE', { faceDownCards: annotated, triggerType: chainContext?.triggerType });
+        const serializedCtx = serializeTriggerContext(chainContext?.triggerType, chainContext?.triggerContext);
+        roomMgr.send(p.ws, 'REQUEST_RESPONSE', { faceDownCards: annotated, triggerType: chainContext?.triggerType, triggerContext: serializedCtx });
+
+        // Tell other players to show "Awaiting opponent..." overlay
+        for (const otherP of room.players) {
+            if (otherP.id !== player.id) {
+                roomMgr.send(otherP.ws, 'AWAITING_RESPONSE', { waitingForPlayerId: player.id });
+            }
+        }
     };
 
     controller.onUIUpdate = () => {
         broadcastGameState(room, roomMgr);
     };
 
-    // Set up the game
-    const playerConfigs = room.players.map(p => ({
-        name: p.name,
-        region: p.region,
-    }));
+    // Set up the game (use custom deckCardIds if present from duel deck select)
+    const playerConfigs = room.players.map(p => {
+        const cfg = { name: p.name, region: p.region };
+        if (p.deckCardIds) cfg.deckCardIds = p.deckCardIds;
+        return cfg;
+    });
 
     await controller.setupGame(playerConfigs, {
         gameMode: 'duel',
@@ -691,31 +852,37 @@ async function startWarRound(warRoom, warRoomMgr, roomMgr, csvText) {
 
     // Wire up callbacks for interactive effects (same as startGame)
     controller.effectEngine.onTargetRequired = (targets, desc, cb) => {
-        const activeId = controller.gameState.activePlayerIndex;
-        const activeP = gameRoom.players.find(p => p.id === activeId);
-        if (!activeP) { cb(targets[0]); return; }
+        // Use source player (card owner) for target selection, fall back to active player
+        const sourceId = controller.effectEngine._currentSourcePlayerId ?? controller.gameState.activePlayerIndex;
+        const sourceP = gameRoom.players.find(p => p.id === sourceId);
+        if (!sourceP) { cb(targets[0]); return; }
         gameRoom.pendingTargetCb = cb;
-        gameRoom.pendingTargetPlayerId = activeId;
-        const serializedTargets = targets.map(t => ({
-            instanceId: t.instanceId, cardId: t.cardId, name: t.name, type: t.type,
-        }));
-        roomMgr.send(activeP.ws, 'REQUEST_TARGET', { targets: serializedTargets, description: desc });
+        gameRoom.pendingTargetPlayerId = sourceId;
+        const serializedTargets = targets.map(t => {
+            if (t.type === 'lp') {
+                return { __lp_target: true, type: 'lp', name: t.name, playerId: t.player?.id };
+            }
+            return { instanceId: t.instanceId, cardId: t.cardId, name: t.name, type: t.type };
+        });
+        roomMgr.send(sourceP.ws, 'REQUEST_TARGET', { targets: serializedTargets, description: desc });
     };
 
     controller.effectEngine.onChoiceRequired = (options, desc, cb) => {
-        const activeId = controller.gameState.activePlayerIndex;
-        const activeP = gameRoom.players.find(p => p.id === activeId);
-        if (!activeP) { cb(options[0]); return; }
+        // Use source player (card owner) for choice selection, fall back to active player
+        const sourceId = controller.effectEngine._currentSourcePlayerId ?? controller.gameState.activePlayerIndex;
+        const sourceP = gameRoom.players.find(p => p.id === sourceId);
+        if (!sourceP) { cb(options[0]); return; }
         gameRoom.pendingChoiceCb = cb;
-        gameRoom.pendingChoicePlayerId = activeId;
-        roomMgr.send(activeP.ws, 'REQUEST_CHOICE', { options, description: desc });
+        gameRoom.pendingChoicePlayerId = sourceId;
+        roomMgr.send(sourceP.ws, 'REQUEST_CHOICE', { options, description: desc });
     };
 
     controller.onOpponentResponse = (player, cb, chainContext) => {
         const p = gameRoom.players.find(rp => rp.id === player.id);
         if (!p) { cb({ activate: false }); return; }
+        const activeId = controller.gameState.activePlayerIndex;
         const faceDownCards = player.getFaceDownCards().filter(c =>
-            (c.type === 'Spell' || c.type === 'Trap') && !c.setThisTurn
+            (c.type === 'Trap' || (c.type === 'Spell' && player.id === activeId)) && !c.setThisTurn
         );
         if (faceDownCards.length === 0) { cb({ activate: false }); return; }
 
@@ -742,9 +909,20 @@ async function startWarRound(warRoom, warRoomMgr, roomMgr, csvText) {
         });
         console.log(`🎴 Response: P${player.id} has ${faceDownCards.length} face-down, ${annotated.filter(c => c.canActivate).length} activatable (trigger: ${chainContext?.triggerType})`);
 
+        // If no cards are eligible, auto-pass without showing the dialog
+        if (!annotated.some(c => c.canActivate)) { cb({ activate: false }); return; }
+
         gameRoom.pendingResponseCb = cb;
         gameRoom.pendingResponsePlayerId = player.id;
-        roomMgr.send(p.ws, 'REQUEST_RESPONSE', { faceDownCards: annotated, triggerType: chainContext?.triggerType });
+        const serializedCtx = serializeTriggerContext(chainContext?.triggerType, chainContext?.triggerContext);
+        roomMgr.send(p.ws, 'REQUEST_RESPONSE', { faceDownCards: annotated, triggerType: chainContext?.triggerType, triggerContext: serializedCtx });
+
+        // Tell other players to show "Awaiting opponent..." overlay
+        for (const otherP of gameRoom.players) {
+            if (otherP.id !== player.id) {
+                roomMgr.send(otherP.ws, 'AWAITING_RESPONSE', { waitingForPlayerId: player.id });
+            }
+        }
     };
 
     controller.onUIUpdate = () => {
@@ -909,9 +1087,16 @@ async function handleAction(room, ws, msg, roomMgr) {
 
         case 'TARGET_SELECTED': {
             if (room.pendingTargetCb && room.pendingTargetPlayerId === playerId) {
-                // Find the actual card instance from the target ID
-                const found = gs.findCardOnField(msg.targetId);
-                const target = found ? found.card : null;
+                let target = null;
+                if (msg.lpTarget) {
+                    // LP target — reconstruct the LP target object
+                    const lpPlayer = gs.getPlayerById(msg.lpPlayerId ?? playerId);
+                    target = { type: 'lp', player: lpPlayer, name: lpPlayer?.name ? `${lpPlayer.name}'s LP` : 'LP' };
+                } else {
+                    // Card target — find the actual card instance from the target ID
+                    const found = gs.findCardOnField(msg.targetId);
+                    target = found ? found.card : null;
+                }
                 const cb = room.pendingTargetCb;
                 room.pendingTargetCb = null;
                 room.pendingTargetPlayerId = null;
@@ -1011,6 +1196,7 @@ async function handleAction(room, ws, msg, roomMgr) {
 
                 // Check game over
                 if (gs.gameOver) {
+                    room._gameOverHandled = true; // Prevent double-reporting by post-switch check
                     // War campaign: route result to WarRoomManager
                     if (room.warRoom) {
                         // Save landmarks for next round
@@ -1036,6 +1222,38 @@ async function handleAction(room, ws, msg, roomMgr) {
                             players: room.players.map(p => ({ name: p.name, region: p.region, lp: gs.getPlayerById(p.id)?.lp ?? 0 })),
                         };
                         roomMgr.broadcast(room, 'GAME_OVER', matchData);
+
+                        // ─── Update Ranked Points & Award Cards ──
+                        if (gs.winner !== null) {
+                            for (const p of room.players) {
+                                if (p.ws.userId && !p.isBot) {
+                                    const outcome = p.id === gs.winner ? 'win' : 'loss';
+                                    try {
+                                        DB.updateRankedPoints(p.ws.userId, outcome);
+                                        console.log(`🏆 Ranked update: ${p.name} (ID ${p.ws.userId}) → ${outcome}`);
+                                    } catch (err) {
+                                        console.error(`Failed to update ranked points for ${p.name}:`, err);
+                                    }
+
+                                    // Award 1 random card for completing a ranked duel
+                                    try {
+                                        const rewardIds = pickRandomRewardCards(p.ws.userId, 1);
+                                        if (rewardIds.length > 0) {
+                                            const result = DB.addCardsToCollection(p.ws.userId, rewardIds);
+                                            const rewardCards = rewardIds.map(id => {
+                                                const card = serverCardDB.getCard(id);
+                                                return card ? { id: card.id, name: card.name, region: card.region, type: card.type } : { id };
+                                            });
+                                            roomMgr.send(p.ws, 'CARDS_UNLOCKED', { cards: rewardCards, source: 'duel' });
+                                            console.log(`🎁 Card reward: ${p.name} unlocked ${rewardIds.join(', ')}`);
+                                        }
+                                    } catch (err) {
+                                        console.error(`Failed to award cards to ${p.name}:`, err);
+                                    }
+                                }
+                            }
+                        }
+
                         logMatchToCSV({
                             date: new Date().toISOString(),
                             duration,
@@ -1084,8 +1302,8 @@ async function handleAction(room, ws, msg, roomMgr) {
     // Always broadcast updated state after actions
     broadcastGameState(room, roomMgr);
 
-    // Check game over after any action
-    if (gs.gameOver) {
+    // Check game over after any action (skip if already handled by END_TURN above)
+    if (gs.gameOver && !room._gameOverHandled) {
         if (room.warRoom) {
             // Save landmarks for next round
             for (const player of gs.players) {
@@ -1167,17 +1385,261 @@ const server = createServer(app);
 // Allow cross-origin requests from the Netlify frontend
 app.use((req, res, next) => {
     res.header('Access-Control-Allow-Origin', '*');
-    res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
+    res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    if (req.method === 'OPTIONS') return res.sendStatus(200);
     next();
 });
+
+// Stripe webhook needs raw body for signature verification — must come BEFORE json parsing
+app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+    if (!stripe || !STRIPE_WEBHOOK_SECRET) {
+        return res.status(503).json({ error: 'Stripe not configured.' });
+    }
+    let event;
+    try {
+        event = stripe.webhooks.constructEvent(req.body, req.headers['stripe-signature'], STRIPE_WEBHOOK_SECRET);
+    } catch (err) {
+        console.error('⚠ Stripe webhook signature verification failed:', err.message);
+        return res.status(400).send(`Webhook Error: ${err.message}`);
+    }
+
+    if (event.type === 'checkout.session.completed') {
+        const session = event.data.object;
+        const { userId, cosmeticType, cosmeticId } = session.metadata || {};
+
+        if (!userId || !cosmeticType || !cosmeticId) {
+            console.error('⚠ Stripe webhook: missing metadata', session.metadata);
+            return res.json({ received: true });
+        }
+
+        // Idempotency: skip if already processed
+        const existing = DB.getPurchaseBySession(session.id);
+        if (existing) {
+            console.log(`🔁 Stripe webhook: session ${session.id} already processed, skipping.`);
+            return res.json({ received: true });
+        }
+
+        // Grant the cosmetic
+        DB.grantCosmetic(Number(userId), cosmeticType, cosmeticId);
+        DB.logPurchase(Number(userId), session.id, cosmeticType, cosmeticId, session.amount_total || 0, session.currency || 'gbp');
+        console.log(`💰 Purchase complete: User ${userId} bought ${cosmeticType}:${cosmeticId} (session ${session.id})`);
+    }
+
+    res.json({ received: true });
+});
+
+// JSON body parsing for API routes (after webhook route)
+app.use(express.json());
+
+// ─── Auth Middleware Helper ──────────────────────────────────
+
+function authMiddleware(req, res, next) {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return res.status(401).json({ error: 'Not authenticated.' });
+    }
+    const token = authHeader.slice(7);
+    const user = DB.getUserByToken(token);
+    if (!user) return res.status(401).json({ error: 'Invalid or expired token.' });
+    req.user = user;
+    req.token = token;
+    next();
+}
+
+// ─── REST API: Auth ──────────────────────────────────────────
+
+app.post('/api/auth/register', (req, res) => {
+    try {
+        const { username, password, displayName, deviceLabel } = req.body;
+        const result = DB.createUser(username, password, displayName, deviceLabel || '');
+        res.json(result);
+    } catch (err) {
+        res.status(400).json({ error: err.message });
+    }
+});
+
+app.post('/api/auth/login', (req, res) => {
+    try {
+        const { username, password, deviceLabel } = req.body;
+        const result = DB.loginUser(username, password, deviceLabel || '');
+        res.json(result);
+    } catch (err) {
+        res.status(401).json({ error: err.message });
+    }
+});
+
+app.get('/api/auth/me', authMiddleware, (req, res) => {
+    const profile = DB.getUserProfile(req.user.id);
+    res.json(profile);
+});
+
+app.post('/api/auth/logout', authMiddleware, (req, res) => {
+    DB.logout(req.token);
+    res.json({ success: true });
+});
+
+app.post('/api/auth/link-code', authMiddleware, (req, res) => {
+    try {
+        const result = DB.generateLinkCode(req.user.id);
+        res.json(result);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/api/auth/link', (req, res) => {
+    try {
+        const { code, deviceLabel } = req.body;
+        const result = DB.redeemLinkCode(code, deviceLabel || '');
+        res.json(result);
+    } catch (err) {
+        res.status(400).json({ error: err.message });
+    }
+});
+
+// ─── REST API: Decks ─────────────────────────────────────────
+
+app.get('/api/decks', authMiddleware, (req, res) => {
+    const decks = DB.getUserDecks(req.user.id);
+    res.json(decks);
+});
+
+app.post('/api/decks', authMiddleware, (req, res) => {
+    try {
+        const { name, region, cardIds, deckId } = req.body;
+        const result = DB.saveUserDeck(req.user.id, name, region, cardIds, deckId || null);
+        res.json(result);
+    } catch (err) {
+        res.status(400).json({ error: err.message });
+    }
+});
+
+app.delete('/api/decks/:id', authMiddleware, (req, res) => {
+    const success = DB.deleteUserDeck(req.user.id, parseInt(req.params.id));
+    res.json({ success });
+});
+
+// ─── REST API: Collection ────────────────────────────────────
+
+app.get('/api/collection', authMiddleware, (req, res) => {
+    const collection = DB.getCollection(req.user.id);
+    res.json(collection);
+});
+
+app.post('/api/collection/choose-region', authMiddleware, (req, res) => {
+    try {
+        const { region } = req.body;
+        const validRegions = ['Northern', 'Eastern', 'Southern', 'Western'];
+        if (!validRegions.includes(region)) {
+            return res.status(400).json({ error: 'Invalid region.' });
+        }
+
+        // Check if user already chose a region
+        const existing = DB.getChosenRegion(req.user.id);
+        if (existing) {
+            return res.status(400).json({ error: 'Region already chosen.' });
+        }
+
+        // Get all cards in the chosen region from the server-level card DB
+        const regionCards = serverCardDB.getCardsByRegion(region)
+            .filter(c => c.type !== 'Token' && c.quantity > 0)
+            .map(c => c.id);
+
+        const result = DB.grantStarterCards(req.user.id, region, regionCards);
+        const collection = DB.getCollection(req.user.id);
+        res.json({ region, collection, granted: result.added });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ─── REST API: Leaderboard & Profile ─────────────────────────
+
+app.get('/api/leaderboard', (req, res) => {
+    const limit = parseInt(req.query.limit) || 50;
+    const board = DB.getLeaderboard(limit);
+    res.json(board);
+});
+
+app.get('/api/profile', authMiddleware, (req, res) => {
+    const profile = DB.getUserProfile(req.user.id);
+    if (!profile) return res.status(404).json({ error: 'Profile not found.' });
+    res.json(profile);
+});
+
+// ─── REST API: Cosmetics Store ───────────────────────────────
+
+app.get('/api/store/catalog', (req, res) => {
+    res.json(STORE_CATALOG);
+});
+
+app.get('/api/store/owned', authMiddleware, (req, res) => {
+    const owned = DB.getUserCosmetics(req.user.id);
+    res.json(owned);
+});
+
+app.post('/api/store/checkout', authMiddleware, async (req, res) => {
+    if (!stripe) {
+        return res.status(503).json({ error: 'Store purchases are not available yet. Stripe is not configured.' });
+    }
+    try {
+        const { cosmeticType, cosmeticId } = req.body;
+        if (!cosmeticType || !cosmeticId) {
+            return res.status(400).json({ error: 'Missing cosmeticType or cosmeticId.' });
+        }
+
+        // Find the item in the catalog
+        const item = STORE_CATALOG.find(c => c.type === cosmeticType && c.id === cosmeticId);
+        if (!item) {
+            return res.status(404).json({ error: 'Item not found in store catalog.' });
+        }
+
+        // Check if already owned
+        if (DB.ownsCosmetic(req.user.id, cosmeticType, cosmeticId)) {
+            return res.status(409).json({ error: 'You already own this item.' });
+        }
+
+        // Create Stripe Checkout Session
+        const session = await stripe.checkout.sessions.create({
+            payment_method_types: ['card'],
+            line_items: [{
+                price_data: {
+                    currency: item.currency,
+                    product_data: {
+                        name: item.name,
+                        description: `${item.type.charAt(0).toUpperCase() + item.type.slice(1)} — Battle Among Regions`,
+                    },
+                    unit_amount: item.price,
+                },
+                quantity: 1,
+            }],
+            mode: 'payment',
+            success_url: `${CLIENT_URL}?purchase=success&item=${cosmeticId}`,
+            cancel_url: `${CLIENT_URL}?purchase=cancelled`,
+            metadata: {
+                userId: String(req.user.id),
+                cosmeticType,
+                cosmeticId,
+            },
+        });
+
+        res.json({ url: session.url });
+    } catch (err) {
+        console.error('Stripe checkout error:', err);
+        res.status(500).json({ error: 'Failed to create checkout session.' });
+    }
+});
+
+// ─── Static Files ────────────────────────────────────────────
 
 // Serve static files from dist (built game)
 app.use(express.static(join(PROJECT_ROOT, 'dist')));
 
 // Also serve card images and CSV from project root
 app.use('/output', express.static(join(PROJECT_ROOT, 'dist', 'output')));
-app.use('/card_dataV4.3.csv', (req, res) => {
-    res.sendFile(join(PROJECT_ROOT, 'card_dataV4.3.csv'));
+app.use('/card_dataV4.4.csv', (req, res) => {
+    res.sendFile(join(PROJECT_ROOT, 'card_dataV4.4.csv'));
 });
 
 // Serve match history CSV for download
@@ -1202,15 +1664,44 @@ const warRoomMgr = new WarRoomManager();
 // Load CSV for game setup
 let csvText;
 try {
-    csvText = readFileSync(join(PROJECT_ROOT, 'card_dataV4.3.csv'), 'utf-8');
+    csvText = readFileSync(join(PROJECT_ROOT, 'card_dataV4.4.csv'), 'utf-8');
     console.log('✅ Card data loaded for server.');
 } catch (err) {
-    console.error('❌ Failed to load card_dataV4.3.csv:', err.message);
+    console.error('❌ Failed to load card_dataV4.4.csv:', err.message);
     process.exit(1);
+}
+
+// Server-level card database for collection operations
+const serverCardDB = new CardDatabase();
+await serverCardDB.loadFromCSV(csvText);
+
+/**
+ * Pick N random playable cards that the user hasn't maxed (3 copies) yet.
+ * @param {number} userId
+ * @param {number} count
+ * @returns {string[]} array of card IDs
+ */
+function pickRandomRewardCards(userId, count) {
+    const collection = DB.getCollection(userId);
+    const ownedMap = {};
+    for (const entry of collection) ownedMap[entry.card_id] = entry.count;
+
+    const allPlayable = serverCardDB.getAllPlayableCards();
+    const eligible = allPlayable.filter(c => (ownedMap[c.id] || 0) < 3);
+    if (eligible.length === 0) return [];
+
+    const picked = [];
+    const shuffled = [...eligible].sort(() => Math.random() - 0.5);
+    for (let i = 0; i < Math.min(count, shuffled.length); i++) {
+        picked.push(shuffled[i].id);
+    }
+    return picked;
 }
 
 wss.on('connection', (ws) => {
     console.log('🔌 New WebSocket connection');
+    ws.userId = null;       // Authenticated user ID (null = guest)
+    ws.displayName = null;  // Authenticated display name
 
     ws.on('message', async (raw) => {
         let msg;
@@ -1221,10 +1712,24 @@ wss.on('connection', (ws) => {
             return;
         }
 
+        // ─── WebSocket Auth ──────────────────────────────
+        if (msg.type === 'AUTH') {
+            const user = DB.getUserByToken(msg.token);
+            if (user) {
+                ws.userId = user.id;
+                ws.displayName = user.display_name;
+                roomMgr.send(ws, 'AUTH_OK', { userId: user.id, displayName: user.display_name });
+                console.log(`🔑 WebSocket authenticated: ${user.display_name} (ID ${user.id})`);
+            } else {
+                roomMgr.send(ws, 'AUTH_FAIL', { message: 'Invalid token.' });
+            }
+            return;
+        }
+
         switch (msg.type) {
             case 'FIND_MATCH': {
                 const name = msg.playerName || 'Player';
-                roomMgr.addToQueue(ws, name);
+                roomMgr.addToQueue(ws, name, msg.cosmetics || null);
                 roomMgr.send(ws, 'SEARCHING', { message: 'Looking for an opponent...' });
                 console.log(`🔍 ${name} is searching for a match (queue: ${roomMgr.matchQueue.length})`);
 
@@ -1237,6 +1742,7 @@ wss.on('connection', (ws) => {
                             yourRegion: p.region,
                             opponentName: opp.name,
                             opponentRegion: opp.region,
+                            opponentCosmetics: opp.cosmetics || null,
                         });
                     }
                     console.log(`⚔ Match found: ${matched.players.map(p => `${p.name} (${p.region})`).join(' vs ')}`);
@@ -1251,6 +1757,103 @@ wss.on('connection', (ws) => {
                 break;
             }
 
+            case 'FIND_DUEL_MATCH': {
+                const name = msg.playerName || 'Player';
+                roomMgr.addToDuelQueue(ws, name, msg.cosmetics || null);
+                roomMgr.send(ws, 'SEARCHING', { message: 'Looking for a duel opponent...' });
+                console.log(`🔍 ${name} is searching for a duel match (queue: ${roomMgr.duelMatchQueue.length})`);
+
+                const matched = roomMgr.tryDuelMatchFromQueue();
+                if (matched) {
+                    // Notify both players — they now choose region + deck
+                    for (const p of matched.players) {
+                        const opp = matched.players.find(op => op.id !== p.id);
+                        roomMgr.send(p.ws, 'DUEL_MATCH_FOUND', {
+                            opponentName: opp.name,
+                        });
+                    }
+                    console.log(`⚔ Duel match found: ${matched.players.map(p => p.name).join(' vs ')} — awaiting deck selections`);
+                }
+                break;
+            }
+
+            case 'CANCEL_DUEL_MATCH': {
+                roomMgr.removeFromDuelQueue(ws);
+                roomMgr.send(ws, 'MATCH_CANCELLED', { message: 'Duel search cancelled.' });
+                console.log(`❌ Player cancelled duel match search`);
+                break;
+            }
+
+            case 'DUEL_DECK_SELECTED': {
+                const room = roomMgr.getRoomByWs(ws);
+                if (!room || room.phase !== 'DUEL_DECK_SELECT') {
+                    roomMgr.send(ws, 'ERROR', { message: 'Not in deck selection phase.' });
+                    break;
+                }
+
+                const player = roomMgr.getPlayerInRoom(room, ws);
+                if (!player) break;
+
+                const region = msg.region;
+                const validRegions = ['Northern', 'Eastern', 'Southern', 'Western'];
+                if (!validRegions.includes(region)) {
+                    roomMgr.send(ws, 'ERROR', { message: 'Invalid region.' });
+                    break;
+                }
+
+                // Validate landmark region constraint
+                let deckCardIds = msg.deckCardIds || null;
+                if (deckCardIds && Array.isArray(deckCardIds)) {
+                    // Load card DB to check landmarks
+                    const { CardDatabase } = await import('../src/engine/CardDatabase.js');
+                    const tempDB = new CardDatabase();
+                    tempDB.loadFromCSV(csvText);
+
+                    const invalidLandmarks = deckCardIds.filter(id => {
+                        const card = tempDB.getCard(id);
+                        return card && card.type === 'Landmark' && card.region !== region;
+                    });
+
+                    if (invalidLandmarks.length > 0) {
+                        roomMgr.send(ws, 'ERROR', { message: `Deck contains landmarks from a different region. All landmarks must be from ${region}.` });
+                        break;
+                    }
+                }
+
+                // Store selection
+                player.region = region;
+                player.deckCardIds = deckCardIds;
+                if (msg.cosmetics) player.cosmetics = msg.cosmetics;
+                room.duelDeckSelections[player.id] = { region, deckCardIds };
+
+                // Tell this player to wait
+                roomMgr.send(ws, 'GAME_PHASE', { phase: 'WAITING', message: 'Waiting for opponent to select their deck...' });
+
+                // Check if both players are ready
+                if (Object.keys(room.duelDeckSelections).length >= 2) {
+                    // Notify both players of final matchup
+                    for (const p of room.players) {
+                        const opp = room.players.find(op => op.id !== p.id);
+                        roomMgr.send(p.ws, 'MATCH_FOUND', {
+                            yourRegion: p.region,
+                            opponentName: opp.name,
+                            opponentRegion: opp.region,
+                            opponentCosmetics: opp.cosmetics || null,
+                        });
+                    }
+
+                    console.log(`⚔ Duel decks confirmed: ${room.players.map(p => `${p.name} (${p.region})`).join(' vs ')}`);
+
+                    try {
+                        await startGame(room, roomMgr, csvText);
+                    } catch (err) {
+                        console.error('Failed to start duel game:', err);
+                        roomMgr.broadcast(room, 'ERROR', { message: 'Failed to start game: ' + err.message });
+                    }
+                }
+                break;
+            }
+
             case 'CANCEL_MATCH': {
                 roomMgr.removeFromQueue(ws);
                 roomMgr.send(ws, 'MATCH_CANCELLED', { message: 'Search cancelled.' });
@@ -1260,6 +1863,7 @@ wss.on('connection', (ws) => {
 
             case 'CREATE_ROOM': {
                 const room = roomMgr.createRoom(ws, msg.playerName || 'Player 1');
+                room.players[0].cosmetics = msg.cosmetics || null;
                 roomMgr.send(ws, 'ROOM_CREATED', { roomCode: room.code });
                 console.log(`🏠 Room ${room.code} created by ${msg.playerName}`);
                 break;
@@ -1272,28 +1876,23 @@ wss.on('connection', (ws) => {
                     roomMgr.send(ws, 'ERROR', { message: result.error });
                 } else {
                     const room = result.room;
-                    // Assign random regions now that both players are in
-                    roomMgr.assignRandomRegions(room);
+                    // Store joiner's cosmetics
+                    const joiner = room.players.find(p => p.ws === ws);
+                    if (joiner) joiner.cosmetics = msg.cosmetics || null;
+                    // Enter deck selection phase — let players pick region + deck
+                    room.phase = 'DUEL_DECK_SELECT';
+                    room.duelDeckSelections = {};
 
-                    // Notify both players of the match with assigned regions
+                    // Notify both players to choose their deck
                     for (const p of room.players) {
                         const opp = room.players.find(op => op.id !== p.id);
-                        roomMgr.send(p.ws, 'MATCH_FOUND', {
-                            yourRegion: p.region,
+                        roomMgr.send(p.ws, 'DUEL_MATCH_FOUND', {
                             opponentName: opp.name,
-                            opponentRegion: opp.region,
+                            opponentCosmetics: opp.cosmetics || null,
                         });
                     }
 
-                    console.log(`🎮 Room ${code}: ${room.players.map(p => `${p.name} (${p.region})`).join(' vs ')} — Starting game!`);
-
-                    // Start the game
-                    try {
-                        await startGame(room, roomMgr, csvText);
-                    } catch (err) {
-                        console.error('Failed to start game:', err);
-                        roomMgr.broadcast(room, 'ERROR', { message: 'Failed to start game: ' + err.message });
-                    }
+                    console.log(`🎮 Room ${code}: ${room.players.map(p => p.name).join(' vs ')} — Deck selection phase`);
                 }
                 break;
             }
@@ -1450,6 +2049,7 @@ wss.on('connection', (ws) => {
     ws.on('close', () => {
         console.log('🔌 WebSocket disconnected');
         roomMgr.removeFromQueue(ws);
+        roomMgr.removeFromDuelQueue(ws);
         roomMgr.removePlayer(ws);
         warRoomMgr.removeFromWarQueue(ws);
         warRoomMgr.removePlayer(ws);
